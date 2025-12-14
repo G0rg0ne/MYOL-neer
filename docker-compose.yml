@@ -1,0 +1,11 @@
+services:
+  flight-fetcher:
+    build: .
+    container_name: flight-price-fetcher
+    env_file:
+      - .env
+    volumes:
+      # Persist collected data to host
+      - ./data:/app/data
+    restart: "no"
+
