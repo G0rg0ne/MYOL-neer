@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Amadeus Flight Price Dataset Builder
+Google Flights Price Dataset Builder
 
-Fetches flight offer data from the Amadeus API and builds a dataset
-with standardized schema for price analysis.
+Fetches flight offer data from Google Flights using fast-flights
+and builds a dataset with standardized schema for price analysis.
 """
 
-import os
 import csv
 import time
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
 
-from amadeus import Client, ResponseError
-from dotenv import load_dotenv
+from fast_flights import FlightData, Passengers, Result, get_flights
 
 # Configure logging
 logging.basicConfig(
@@ -24,12 +23,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
 
-
-class AmadeusFlightFetcher:
-    """Fetches flight prices from Amadeus API and structures them into a dataset."""
+class GoogleFlightsFetcher:
+    """Fetches flight prices from Google Flights and structures them into a dataset."""
     
     SCHEMA = [
         'origin',
@@ -44,58 +40,50 @@ class AmadeusFlightFetcher:
         'flight_duration',
         'cabin',
         'offer_rank',
+        'departure_time',
+        'arrival_time',
         'source'
     ]
     
     # Rate limiting defaults
-    DEFAULT_REQUEST_DELAY = 0.5  # seconds between requests
+    DEFAULT_REQUEST_DELAY = 2.0  # seconds between requests (be respectful to Google)
     DEFAULT_MAX_RETRIES = 3
-    DEFAULT_RETRY_DELAY = 5  # seconds before retry on rate limit
+    DEFAULT_RETRY_DELAY = 10  # seconds before retry on error
+    
+    # Seat class mapping
+    SEAT_CLASSES = {
+        'economy': 'ECONOMY',
+        'premium-economy': 'PREMIUM_ECONOMY',
+        'business': 'BUSINESS',
+        'first': 'FIRST'
+    }
     
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        api_secret: Optional[str] = None,
-        environment: str = 'test',
         request_delay: float = DEFAULT_REQUEST_DELAY,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        retry_delay: float = DEFAULT_RETRY_DELAY
+        retry_delay: float = DEFAULT_RETRY_DELAY,
+        fetch_mode: str = "local"
     ):
         """
-        Initialize the Amadeus client.
+        Initialize the Google Flights fetcher.
         
         Args:
-            api_key: Amadeus API key (defaults to env var AMADEUS_API_KEY)
-            api_secret: Amadeus API secret (defaults to env var AMADEUS_API_SECRET)
-            environment: 'test' for sandbox or 'production' for live API
-            request_delay: Seconds to wait between API requests (default 0.5s)
-            max_retries: Maximum retries on rate limit errors (default 3)
-            retry_delay: Base delay in seconds before retry, doubles each attempt (default 5s)
+            request_delay: Seconds to wait between requests (default 2s)
+            max_retries: Maximum retries on errors (default 3)
+            retry_delay: Base delay in seconds before retry (default 10s)
+            fetch_mode: fast-flights fetch mode:
+                - "common": Direct HTTP requests (fastest, may hit consent walls)
+                - "local": Uses local Playwright browser (handles JS, slower)
+                - "fallback": Tries common first, falls back to external API
         """
-        self.api_key = api_key or os.getenv('AMADEUS_API_KEY')
-        self.api_secret = api_secret or os.getenv('AMADEUS_API_SECRET')
-        self.environment = environment or os.getenv('AMADEUS_ENV', 'test')
-        
-        # Rate limiting configuration
         self.request_delay = request_delay
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.fetch_mode = fetch_mode
         self._last_request_time = 0.0
         
-        if not self.api_key or not self.api_secret:
-            raise ValueError(
-                "Amadeus API credentials required. Set AMADEUS_API_KEY and "
-                "AMADEUS_API_SECRET environment variables or pass them directly."
-            )
-        
-        # Initialize Amadeus client
-        hostname = 'production' if self.environment == 'production' else 'test'
-        self.client = Client(
-            client_id=self.api_key,
-            client_secret=self.api_secret,
-            hostname=hostname
-        )
-        logger.info(f"Amadeus client initialized (environment: {hostname}, delay: {request_delay}s)")
+        logger.info(f"Google Flights fetcher initialized (delay: {request_delay}s, mode: {fetch_mode})")
     
     def _wait_for_rate_limit(self) -> None:
         """Wait to respect rate limiting between requests."""
@@ -108,31 +96,97 @@ class AmadeusFlightFetcher:
     
     def _parse_duration(self, duration_str: str) -> int:
         """
-        Parse ISO 8601 duration string to minutes.
+        Parse duration string to minutes.
         
         Args:
-            duration_str: Duration in ISO 8601 format (e.g., 'PT2H30M')
+            duration_str: Duration like "2 hr 30 min" or "1h 45m"
             
         Returns:
             Total duration in minutes
         """
         if not duration_str:
             return 0
-            
-        duration_str = duration_str.replace('PT', '')
+        
+        duration_str = duration_str.lower().strip()
         hours = 0
         minutes = 0
         
-        if 'H' in duration_str:
-            hours_part, duration_str = duration_str.split('H')
-            hours = int(hours_part)
+        # Try pattern: "2 hr 30 min" or "2 hr" or "30 min"
+        hr_match = re.search(r'(\d+)\s*(?:hr|hour|h)', duration_str)
+        min_match = re.search(r'(\d+)\s*(?:min|minute|m)', duration_str)
         
-        if 'M' in duration_str:
-            minutes_part = duration_str.replace('M', '')
-            if minutes_part:
-                minutes = int(minutes_part)
+        if hr_match:
+            hours = int(hr_match.group(1))
+        if min_match:
+            minutes = int(min_match.group(1))
         
         return hours * 60 + minutes
+    
+    def _parse_price(self, price_str: str) -> tuple[float, str]:
+        """
+        Parse price string to amount and currency.
+        
+        Args:
+            price_str: Price like "$299" or "€199" or "299 USD"
+            
+        Returns:
+            Tuple of (price_amount, currency_code)
+        """
+        if not price_str:
+            return 0.0, 'USD'
+        
+        price_str = price_str.strip()
+        
+        # Currency symbol mapping
+        currency_symbols = {
+            '$': 'USD',
+            '€': 'EUR',
+            '£': 'GBP',
+            '¥': 'JPY',
+            '₹': 'INR',
+            'A$': 'AUD',
+            'C$': 'CAD',
+        }
+        
+        currency = 'USD'
+        for symbol, code in currency_symbols.items():
+            if symbol in price_str:
+                currency = code
+                price_str = price_str.replace(symbol, '')
+                break
+        
+        # Extract numeric value
+        price_match = re.search(r'[\d,]+(?:\.\d+)?', price_str.replace(',', ''))
+        if price_match:
+            price_value = float(price_match.group().replace(',', ''))
+        else:
+            price_value = 0.0
+        
+        return price_value, currency
+    
+    def _parse_stops(self, stops_info: str) -> int:
+        """
+        Parse stops information.
+        
+        Args:
+            stops_info: String like "Nonstop", "1 stop", "2 stops"
+            
+        Returns:
+            Number of stops (0 for nonstop)
+        """
+        if not stops_info:
+            return 0
+        
+        stops_info = stops_info.lower().strip()
+        
+        if 'nonstop' in stops_info or 'direct' in stops_info:
+            return 0
+        
+        stops_match = re.search(r'(\d+)\s*stop', stops_info)
+        if stops_match:
+            return int(stops_match.group(1))
+        
+        return 0
     
     def fetch_flight_offers(
         self,
@@ -140,18 +194,20 @@ class AmadeusFlightFetcher:
         destination: str,
         departure_date: str,
         adults: int = 1,
-        cabin_class: Optional[str] = None,
+        children: int = 0,
+        seat_class: str = 'economy',
         max_offers: int = 50
     ) -> list[dict]:
         """
-        Fetch flight offers from Amadeus API.
+        Fetch flight offers from Google Flights.
         
         Args:
-            origin: IATA airport/city code (e.g., 'JFK')
-            destination: IATA airport/city code (e.g., 'LAX')
+            origin: IATA airport code (e.g., 'JFK')
+            destination: IATA airport code (e.g., 'LAX')
             departure_date: Date in YYYY-MM-DD format
             adults: Number of adult passengers
-            cabin_class: Optional cabin class (ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST)
+            children: Number of child passengers
+            seat_class: Seat class (economy, premium-economy, business, first)
             max_offers: Maximum number of offers to retrieve
             
         Returns:
@@ -162,117 +218,113 @@ class AmadeusFlightFetcher:
         query_dt = datetime.strptime(query_date, '%Y-%m-%d')
         days_before = (departure_dt - query_dt).days
         
+        # Skip past dates
+        if days_before < 0:
+            logger.warning(f"Skipping past date: {departure_date}")
+            return []
+        
         try:
-            # Build search parameters
-            search_params = {
-                'originLocationCode': origin.upper(),
-                'destinationLocationCode': destination.upper(),
-                'departureDate': departure_date,
-                'adults': adults,
-                'max': max_offers
-            }
-            
-            if cabin_class:
-                search_params['travelClass'] = cabin_class.upper()
-            
             logger.info(f"Fetching flights: {origin} → {destination} on {departure_date}")
             
             # Rate limiting: wait between requests
             self._wait_for_rate_limit()
             
-            # Make API request with retry logic for rate limits
-            response = None
+            # Prepare flight data
+            flight_data = FlightData(
+                date=departure_date,
+                from_airport=origin.upper(),
+                to_airport=destination.upper()
+            )
+            
+            # Prepare passengers
+            passengers = Passengers(
+                adults=adults,
+                children=children,
+                infants_in_seat=0,
+                infants_on_lap=0
+            )
+            
+            # Normalize seat class
+            seat = seat_class.lower() if seat_class else 'economy'
+            if seat not in self.SEAT_CLASSES:
+                seat = 'economy'
+            
+            cabin_label = self.SEAT_CLASSES[seat]
+            
+            # Make request with retry logic
+            result = None
             for attempt in range(self.max_retries + 1):
                 try:
-                    response = self.client.shopping.flight_offers_search.get(**search_params)
+                    result: Result = get_flights(
+                        flight_data=[flight_data],
+                        trip="one-way",
+                        seat=seat,
+                        passengers=passengers,
+                        fetch_mode=self.fetch_mode,
+                    )
                     break  # Success, exit retry loop
-                except ResponseError as e:
-                    if e.response.status_code == 429:  # Rate limit exceeded
-                        if attempt < self.max_retries:
-                            wait_time = self.retry_delay * (2 ** attempt)  # Exponential backoff
-                            logger.warning(
-                                f"Rate limit hit, waiting {wait_time}s before retry "
-                                f"({attempt + 1}/{self.max_retries})"
-                            )
-                            time.sleep(wait_time)
-                            continue
-                        else:
-                            logger.error("Max retries exceeded for rate limit")
-                            raise
+                except Exception as e:
+                    if attempt < self.max_retries:
+                        wait_time = self.retry_delay * (2 ** attempt)  # Exponential backoff
+                        logger.warning(
+                            f"Request failed, waiting {wait_time}s before retry "
+                            f"({attempt + 1}/{self.max_retries}): {e}"
+                        )
+                        time.sleep(wait_time)
+                        continue
                     else:
-                        raise  # Re-raise non-rate-limit errors
+                        logger.error(f"Max retries exceeded: {e}")
+                        raise
             
-            if response is None:
+            if result is None or not hasattr(result, 'flights') or not result.flights:
+                logger.warning(f"No flights found for {origin}→{destination} on {departure_date}")
                 return []
             
             offers = []
-            for rank, offer in enumerate(response.data, start=1):
-                # Extract price information
-                price = float(offer.get('price', {}).get('total', 0))
-                currency = offer.get('price', {}).get('currency', 'USD')
+            for rank, flight in enumerate(result.flights[:max_offers], start=1):
+                # Parse flight details
+                price, currency = self._parse_price(getattr(flight, 'price', ''))
                 
-                # Process each itinerary (we focus on outbound)
-                for itinerary in offer.get('itineraries', []):
-                    segments = itinerary.get('segments', [])
-                    
-                    if not segments:
-                        continue
-                    
-                    # Calculate stops (number of segments - 1)
-                    stops = len(segments) - 1
-                    
-                    # Get primary airline (operating carrier of first segment)
-                    first_segment = segments[0]
-                    airline = first_segment.get('operating', {}).get('carrierCode') or \
-                              first_segment.get('carrierCode', 'UNKNOWN')
-                    
-                    # Parse total flight duration
-                    duration_str = itinerary.get('duration', 'PT0M')
-                    flight_duration = self._parse_duration(duration_str)
-                    
-                    # Get cabin class from traveler pricings
-                    cabin = 'ECONOMY'  # default
-                    traveler_pricings = offer.get('travelerPricings', [])
-                    if traveler_pricings:
-                        fare_details = traveler_pricings[0].get('fareDetailsBySegment', [])
-                        if fare_details:
-                            cabin = fare_details[0].get('cabin', 'ECONOMY')
-                    
-                    offer_data = {
-                        'origin': origin.upper(),
-                        'destination': destination.upper(),
-                        'departure_date': departure_date,
-                        'query_date': query_date,
-                        'days_before_departure': days_before,
-                        'airline': airline,
-                        'price': price,
-                        'currency': currency,
-                        'stops': stops,
-                        'flight_duration': flight_duration,
-                        'cabin': cabin,
-                        'offer_rank': rank,
-                        'source': 'amadeus'
-                    }
-                    offers.append(offer_data)
-                    break  # Only take first itinerary per offer
+                # Get stops info
+                stops_info = getattr(flight, 'stops', '')
+                stops = self._parse_stops(str(stops_info) if stops_info else 'Nonstop')
+                
+                # Get duration
+                duration_str = getattr(flight, 'duration', '')
+                flight_duration = self._parse_duration(str(duration_str) if duration_str else '')
+                
+                # Get airline
+                airline = getattr(flight, 'name', '') or 'Unknown'
+                # Clean up airline name - just get the carrier code or short name
+                if airline and ',' in airline:
+                    airline = airline.split(',')[0].strip()
+                
+                # Get times
+                departure_time = getattr(flight, 'departure', '') or ''
+                arrival_time = getattr(flight, 'arrival', '') or ''
+                
+                offer_data = {
+                    'origin': origin.upper(),
+                    'destination': destination.upper(),
+                    'departure_date': departure_date,
+                    'query_date': query_date,
+                    'days_before_departure': days_before,
+                    'airline': airline,
+                    'price': price,
+                    'currency': currency,
+                    'stops': stops,
+                    'flight_duration': flight_duration,
+                    'cabin': cabin_label,
+                    'offer_rank': rank,
+                    'departure_time': departure_time,
+                    'arrival_time': arrival_time,
+                    'source': 'google_flights'
+                }
+                offers.append(offer_data)
             
             logger.info(f"Retrieved {len(offers)} flight offers")
             return offers
             
-        except ResponseError as e:
-            # Handle common API errors gracefully
-            status = e.response.status_code
-            body = e.response.body
-            
-            if status == 400 or 'SYSTEM ERROR' in str(body):
-                # Test environment often lacks data for certain routes
-                logger.warning(
-                    f"No data available for {origin}→{destination} on {departure_date} "
-                    f"(API returned {status}). Skipping..."
-                )
-            else:
-                logger.error(f"Amadeus API error: {status} - {body}")
-            return []
         except Exception as e:
             logger.error(f"Error fetching flight offers: {e}")
             return []
@@ -281,7 +333,8 @@ class AmadeusFlightFetcher:
         self,
         routes: list[tuple[str, str]],
         departure_dates: list[str],
-        cabin_class: Optional[str] = None,
+        seat_class: str = 'economy',
+        adults: int = 1,
         max_offers_per_search: int = 50
     ) -> list[dict]:
         """
@@ -290,7 +343,8 @@ class AmadeusFlightFetcher:
         Args:
             routes: List of (origin, destination) tuples
             departure_dates: List of departure dates in YYYY-MM-DD format
-            cabin_class: Optional cabin class filter
+            seat_class: Seat class filter
+            adults: Number of adult passengers
             max_offers_per_search: Max offers per individual search
             
         Returns:
@@ -311,7 +365,8 @@ class AmadeusFlightFetcher:
                     origin=origin,
                     destination=destination,
                     departure_date=date,
-                    cabin_class=cabin_class,
+                    adults=adults,
+                    seat_class=seat_class,
                     max_offers=max_offers_per_search
                 )
                 all_offers.extend(offers)
@@ -383,24 +438,23 @@ def generate_date_range(start_days: int = 1, end_days: int = 90, step: int = 7) 
 def main():
     """Main entry point for the flight price fetcher."""
     
-    # European routes - using city codes for better test environment coverage
-    # Note: Amadeus test environment has limited data; some routes may return no results
+    # European routes using IATA airport codes
     routes = [
-        ('LON', 'PAR'),  # London to Paris (city codes have broader coverage)
-        ('PAR', 'LON'),  # Paris to London
+        ('LHR', 'CDG'),  # London Heathrow to Paris CDG
+        ('CDG', 'LHR'),  # Paris CDG to London Heathrow
         ('MAD', 'BCN'),  # Madrid to Barcelona
         ('BCN', 'MAD'),  # Barcelona to Madrid
-        ('FRA', 'LON'),  # Frankfurt to London
-        ('LON', 'AMS'),  # London to Amsterdam
-        ('PAR', 'MAD'),  # Paris to Madrid
-        ('MAD', 'ROM'),  # Madrid to Rome
-        ('LON', 'ROM'),  # London to Rome
-        ('PAR', 'BCN'),  # Paris to Barcelona
-        ('AMS', 'PAR'),  # Amsterdam to Paris
-        ('MUC', 'LON'),  # Munich to London
-        ('FRA', 'PAR'),  # Frankfurt to Paris
-        ('LON', 'BER'),  # London to Berlin
-        ('PAR', 'MIL'),  # Paris to Milan
+        ('FRA', 'LHR'),  # Frankfurt to London
+        ('LHR', 'AMS'),  # London to Amsterdam
+        ('CDG', 'MAD'),  # Paris to Madrid
+        ('MAD', 'FCO'),  # Madrid to Rome
+        ('LHR', 'FCO'),  # London to Rome
+        ('CDG', 'BCN'),  # Paris to Barcelona
+        ('AMS', 'CDG'),  # Amsterdam to Paris
+        ('MUC', 'LHR'),  # Munich to London
+        ('FRA', 'CDG'),  # Frankfurt to Paris
+        ('LHR', 'BER'),  # London to Berlin
+        ('CDG', 'MXP'),  # Paris to Milan
     ]
     
     # Generate dates: every 7 days for the next 60 days
@@ -413,12 +467,16 @@ def main():
     
     try:
         # Initialize fetcher
-        fetcher = AmadeusFlightFetcher()
+        fetcher = GoogleFlightsFetcher(
+            request_delay=2.0,  # Be respectful to Google
+            fetch_mode="fallback"
+        )
         
         # Fetch all offers
         all_offers = fetcher.fetch_multiple_routes(
             routes=routes,
             departure_dates=departure_dates,
+            seat_class='economy',
             max_offers_per_search=20
         )
         
@@ -430,10 +488,6 @@ def main():
         else:
             print("\n✗ No flight offers retrieved")
             
-    except ValueError as e:
-        print(f"\n✗ Configuration error: {e}")
-        print("  Please set up your .env file with Amadeus credentials.")
-        return 1
     except Exception as e:
         print(f"\n✗ Error: {e}")
         return 1
@@ -443,4 +497,3 @@ def main():
 
 if __name__ == '__main__':
     exit(main())
-
