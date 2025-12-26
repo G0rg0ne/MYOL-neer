@@ -9,6 +9,7 @@ dependencies = [
     "selectolax",
     "pandas>=2.0.0",
     "schedule>=1.2.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
