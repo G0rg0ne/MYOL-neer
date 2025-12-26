@@ -3,6 +3,5 @@ services:
     build: .
     container_name: flight-price-fetcher
     volumes:
-      # Persist collected data to host
       - ./data:/app/data
     restart: "no"
