@@ -14,7 +14,33 @@ from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
 
+import yaml
+
 from fast_flights import FlightData, Passengers, create_filter, get_flights_from_filter
+
+
+def load_config(config_path: Optional[str] = None) -> dict:
+    """
+    Load configuration from YAML file.
+    
+    Args:
+        config_path: Path to config file. If None, looks for config.yaml in script directory.
+        
+    Returns:
+        Configuration dictionary with all settings
+    """
+    if config_path is None:
+        config_path = Path(__file__).parent / 'config.yaml'
+    else:
+        config_path = Path(config_path)
+    
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    
+    return config
 
 # Configure logging
 logging.basicConfig(
@@ -439,50 +465,72 @@ def generate_date_range(start_days: int = 1, end_days: int = 90, step: int = 7) 
     return dates
 
 
-def main():
-    """Main entry point for the flight price fetcher."""
+def main(config_path: Optional[str] = None):
+    """
+    Main entry point for the flight price fetcher.
     
-    # European routes using IATA airport codes
-    # routes = [
-    #     ('LHR', 'CDG'),  # London Heathrow to Paris CDG
-    #     ('CDG', 'LHR'),  # Paris CDG to London Heathrow
-    #     ('MAD', 'BCN'),  # Madrid to Barcelona
-    #     ('BCN', 'MAD'),  # Barcelona to Madrid
-    #     ('FRA', 'LHR'),  # Frankfurt to London
-    #     ('LHR', 'AMS'),  # London to Amsterdam
-    #     ('CDG', 'MAD'),  # Paris to Madrid
-    #     ('MAD', 'FCO'),  # Madrid to Rome
-    #     ('LHR', 'FCO'),  # London to Rome
-    #     ('CDG', 'BCN'),  # Paris to Barcelona
-    #     ('AMS', 'CDG'),  # Amsterdam to Paris
-    #     ('MUC', 'LHR'),  # Munich to London
-    #     ('FRA', 'CDG'),  # Frankfurt to Paris
-    #     ('LHR', 'BER'),  # London to Berlin
-    #     ('CDG', 'MXP'),  # Paris to Milan
-    # ]
-    routes=[('CDG', 'AMS'),('CDG', 'MAD')]
+    Args:
+        config_path: Optional path to config file. If None, uses config.yaml in script directory.
+    """
     
-    # Generate dates: every 7 days for the next 60 days
-    departure_dates = generate_date_range(start_days=7, end_days=60, step=7)
+    # Load configuration
+    try:
+        config = load_config(config_path)
+        logger.info(f"Loaded configuration from {config_path or 'config.yaml'}")
+    except FileNotFoundError as e:
+        print(f"\n✗ {e}")
+        print("  Please create a config.yaml file or specify a valid config path.")
+        return 1
+    
+    # Extract settings from config
+    fetcher_config = config.get('fetcher', {})
+    search_config = config.get('search', {})
+    date_config = config.get('date_range', {})
+    output_config = config.get('output', {})
+    
+    # Routes from config (convert lists to tuples)
+    routes_list = config.get('routes', [])
+    routes = [tuple(route) for route in routes_list]
+    
+    if not routes:
+        print("\n✗ No routes configured in config.yaml")
+        return 1
+    
+    # Generate dates from config
+    departure_dates = generate_date_range(
+        start_days=date_config.get('start_days', 7),
+        end_days=date_config.get('end_days', 60),
+        step=date_config.get('step', 7)
+    )
     
     # Output file with timestamp
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = Path(__file__).parent / 'data'
-    output_file = output_dir / f'flight_prices_{timestamp}.csv'
+    output_dir = Path(__file__).parent / output_config.get('directory', 'data')
+    file_prefix = output_config.get('file_prefix', 'flight_prices')
+    output_file = output_dir / f'{file_prefix}_{timestamp}.csv'
     
     try:
-        # Initialize fetcher
+        # Initialize fetcher with config settings
         fetcher = GoogleFlightsFetcher(
-            request_delay=2.0,  # Be respectful to Google
-            mode="local"  # Uses local Playwright browser
+            request_delay=fetcher_config.get('request_delay', 2.0),
+            max_retries=fetcher_config.get('max_retries', 3),
+            retry_delay=fetcher_config.get('retry_delay', 10),
+            mode=fetcher_config.get('mode', 'local')
         )
+        
+        # Log configuration summary
+        logger.info(f"Routes: {len(routes)}")
+        logger.info(f"Date range: {date_config.get('start_days', 7)}-{date_config.get('end_days', 60)} days, step={date_config.get('step', 7)}")
+        logger.info(f"Seat class: {search_config.get('seat_class', 'economy')}")
+        logger.info(f"Max offers per search: {search_config.get('max_offers_per_search', 20)}")
         
         # Fetch all offers
         all_offers = fetcher.fetch_multiple_routes(
             routes=routes,
             departure_dates=departure_dates,
-            seat_class='economy',
-            max_offers_per_search=20
+            seat_class=search_config.get('seat_class', 'economy'),
+            adults=search_config.get('adults', 1),
+            max_offers_per_search=search_config.get('max_offers_per_search', 20)
         )
         
         # Save to CSV
@@ -495,6 +543,7 @@ def main():
             
     except Exception as e:
         print(f"\n✗ Error: {e}")
+        logger.exception("Error during flight fetching")
         return 1
     
     return 0
