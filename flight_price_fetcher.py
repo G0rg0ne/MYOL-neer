@@ -443,23 +443,24 @@ def main():
     """Main entry point for the flight price fetcher."""
     
     # European routes using IATA airport codes
-    routes = [
-        ('LHR', 'CDG'),  # London Heathrow to Paris CDG
-        ('CDG', 'LHR'),  # Paris CDG to London Heathrow
-        ('MAD', 'BCN'),  # Madrid to Barcelona
-        ('BCN', 'MAD'),  # Barcelona to Madrid
-        ('FRA', 'LHR'),  # Frankfurt to London
-        ('LHR', 'AMS'),  # London to Amsterdam
-        ('CDG', 'MAD'),  # Paris to Madrid
-        ('MAD', 'FCO'),  # Madrid to Rome
-        ('LHR', 'FCO'),  # London to Rome
-        ('CDG', 'BCN'),  # Paris to Barcelona
-        ('AMS', 'CDG'),  # Amsterdam to Paris
-        ('MUC', 'LHR'),  # Munich to London
-        ('FRA', 'CDG'),  # Frankfurt to Paris
-        ('LHR', 'BER'),  # London to Berlin
-        ('CDG', 'MXP'),  # Paris to Milan
-    ]
+    # routes = [
+    #     ('LHR', 'CDG'),  # London Heathrow to Paris CDG
+    #     ('CDG', 'LHR'),  # Paris CDG to London Heathrow
+    #     ('MAD', 'BCN'),  # Madrid to Barcelona
+    #     ('BCN', 'MAD'),  # Barcelona to Madrid
+    #     ('FRA', 'LHR'),  # Frankfurt to London
+    #     ('LHR', 'AMS'),  # London to Amsterdam
+    #     ('CDG', 'MAD'),  # Paris to Madrid
+    #     ('MAD', 'FCO'),  # Madrid to Rome
+    #     ('LHR', 'FCO'),  # London to Rome
+    #     ('CDG', 'BCN'),  # Paris to Barcelona
+    #     ('AMS', 'CDG'),  # Amsterdam to Paris
+    #     ('MUC', 'LHR'),  # Munich to London
+    #     ('FRA', 'CDG'),  # Frankfurt to Paris
+    #     ('LHR', 'BER'),  # London to Berlin
+    #     ('CDG', 'MXP'),  # Paris to Milan
+    # ]
+    routes=[('CDG', 'AMS'),('CDG', 'MAD')]
     
     # Generate dates: every 7 days for the next 60 days
     departure_dates = generate_date_range(start_days=7, end_days=60, step=7)
