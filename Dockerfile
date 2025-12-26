@@ -51,3 +51,5 @@ ENV PYTHONUNBUFFERED=1
 
 # Use uv run to execute commands within the virtual environment
 ENTRYPOINT ["uv", "run"]
+
+CMD ["python", "flight_price_fetcher.py"]
