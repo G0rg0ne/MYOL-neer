@@ -1,0 +1,65 @@
+# Flight Price Fetcher Configuration
+# ====================================
+
+# Fetcher Settings
+fetcher:
+  # Seconds to wait between requests (be respectful to Google)
+  request_delay: 2.0
+  
+  # Maximum retries on errors
+  max_retries: 3
+  
+  # Base delay in seconds before retry
+  retry_delay: 10
+  
+  # Mode for fast-flights:
+  # - "common": Direct HTTP requests (fastest, may hit consent walls)
+  # - "local": Uses local Playwright browser (handles JS, slower)
+  mode: "local"
+
+# Search Parameters
+search:
+  # Maximum number of offers to retrieve per search
+  max_offers_per_search: 20
+  
+  # Seat class: economy, premium-economy, business, first
+  seat_class: "economy"
+  
+  # Number of passengers
+  adults: 1
+  children: 0
+  
+  # Currency preference (affects price display)
+  # Common: USD, EUR, GBP, JPY, INR, AUD, CAD
+  currency: "EUR"
+
+# Date Range Settings
+date_range:
+  # Days from today to start searching
+  start_days: 1
+  
+  # Days from today to end searching
+  end_days: 7
+  
+  # Day interval between search dates
+  step: 1
+
+# Routes to Search
+# Format: list of [origin, destination] airport codes (IATA)
+routes:
+  - ["CDG", "AMS"]  # Paris to Amsterdam
+  - ["CDG", "MAD"]  # Paris to Madrid
+  - ["LHR", "CDG"]
+  # Add more routes as needed:
+  # - ["LHR", "CDG"]  # London to Paris
+  # - ["MAD", "BCN"]  # Madrid to Barcelona
+  # - ["FRA", "LHR"]  # Frankfurt to London
+
+# Output Settings
+output:
+  # Output directory for CSV files (relative to script location)
+  directory: "data"
+  
+  # Prefix for output files (timestamp will be appended)
+  file_prefix: "flight_prices"
+
