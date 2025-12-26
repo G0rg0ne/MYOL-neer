@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
 
-from fast_flights import FlightData, Passengers, Result, get_flights
+from fast_flights import FlightData, Passengers, create_filter, get_flights_from_filter
 
 # Configure logging
 logging.basicConfig(
@@ -63,7 +63,7 @@ class GoogleFlightsFetcher:
         request_delay: float = DEFAULT_REQUEST_DELAY,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: float = DEFAULT_RETRY_DELAY,
-        fetch_mode: str = "local"
+        mode: str = "local"
     ):
         """
         Initialize the Google Flights fetcher.
@@ -72,18 +72,17 @@ class GoogleFlightsFetcher:
             request_delay: Seconds to wait between requests (default 2s)
             max_retries: Maximum retries on errors (default 3)
             retry_delay: Base delay in seconds before retry (default 10s)
-            fetch_mode: fast-flights fetch mode:
+            mode: fast-flights mode for get_flights_from_filter:
                 - "common": Direct HTTP requests (fastest, may hit consent walls)
                 - "local": Uses local Playwright browser (handles JS, slower)
-                - "fallback": Tries common first, falls back to external API
         """
         self.request_delay = request_delay
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self.fetch_mode = fetch_mode
+        self.mode = mode
         self._last_request_time = 0.0
         
-        logger.info(f"Google Flights fetcher initialized (delay: {request_delay}s, mode: {fetch_mode})")
+        logger.info(f"Google Flights fetcher initialized (delay: {request_delay}s, mode: {mode})")
     
     def _wait_for_rate_limit(self) -> None:
         """Wait to respect rate limiting between requests."""
@@ -251,16 +250,21 @@ class GoogleFlightsFetcher:
             
             cabin_label = self.SEAT_CLASSES[seat]
             
+            # Create filter using the same method as test_flight.py
+            flight_filter = create_filter(
+                flight_data=[flight_data],
+                trip="one-way",
+                passengers=passengers,
+                seat=seat,
+            )
+            
             # Make request with retry logic
             result = None
             for attempt in range(self.max_retries + 1):
                 try:
-                    result: Result = get_flights(
-                        flight_data=[flight_data],
-                        trip="one-way",
-                        seat=seat,
-                        passengers=passengers,
-                        fetch_mode=self.fetch_mode,
+                    result = get_flights_from_filter(
+                        flight_filter,
+                        mode=self.mode,
                     )
                     break  # Success, exit retry loop
                 except Exception as e:
@@ -469,7 +473,7 @@ def main():
         # Initialize fetcher
         fetcher = GoogleFlightsFetcher(
             request_delay=2.0,  # Be respectful to Google
-            fetch_mode="fallback"
+            mode="local"  # Uses local Playwright browser
         )
         
         # Fetch all offers
