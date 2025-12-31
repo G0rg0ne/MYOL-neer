@@ -89,7 +89,8 @@ class GoogleFlightsFetcher:
         request_delay: float = DEFAULT_REQUEST_DELAY,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: float = DEFAULT_RETRY_DELAY,
-        mode: str = "local"
+        mode: str = "local",
+        max_direct_durations: Optional[dict] = None
     ):
         """
         Initialize the Google Flights fetcher.
@@ -101,14 +102,36 @@ class GoogleFlightsFetcher:
             mode: fast-flights mode for get_flights_from_filter:
                 - "common": Direct HTTP requests (fastest, may hit consent walls)
                 - "local": Uses local Playwright browser (handles JS, slower)
+            max_direct_durations: Dict mapping route keys to max direct flight duration in minutes.
+                Format: {"AMS-CDG": 100, "CDG-MAD": 160, ...}
         """
         self.request_delay = request_delay
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.mode = mode
         self._last_request_time = 0.0
+        self._max_direct_durations = self._parse_duration_config(max_direct_durations or {})
         
         logger.info(f"Google Flights fetcher initialized (delay: {request_delay}s, mode: {mode})")
+    
+    def _parse_duration_config(self, config_durations: dict) -> dict:
+        """
+        Parse duration config from YAML format to internal tuple-key format.
+        
+        Args:
+            config_durations: Dict like {"AMS-CDG": 100, "CDG-MAD": 160}
+            
+        Returns:
+            Dict like {("AMS", "CDG"): 100, ("CDG", "MAD"): 160}
+        """
+        parsed = {}
+        for route_str, duration in config_durations.items():
+            parts = route_str.upper().split('-')
+            if len(parts) == 2:
+                # Sort to make lookup order-independent
+                key = tuple(sorted(parts))
+                parsed[key] = duration
+        return parsed
     
     def _wait_for_rate_limit(self) -> None:
         """Wait to respect rate limiting between requests."""
@@ -189,6 +212,31 @@ class GoogleFlightsFetcher:
         
         return price_value, currency
     
+    def _format_time(self, hour: int, minute: int, date_tuple: tuple) -> str:
+        """
+        Format time and date into a readable string.
+        
+        Args:
+            hour: Hour (0-23)
+            minute: Minute (0-59)
+            date_tuple: Date as (year, month, day) tuple
+            
+        Returns:
+            Formatted string like "8:10 AM on Sun, Mar 1"
+        """
+        try:
+            year, month, day = date_tuple
+            dt = datetime(year, month, day, hour, minute)
+            # Format time: 12-hour with AM/PM
+            hour_12 = hour % 12 or 12
+            am_pm = "AM" if hour < 12 else "PM"
+            time_str = f"{hour_12}:{minute:02d} {am_pm}"
+            # Format date: "Sun, Mar 1"
+            date_str = dt.strftime("%a, %b") + f" {day}"
+            return f"{time_str} on {date_str}"
+        except Exception:
+            return f"{hour}:{minute:02d}"
+    
     def _parse_stops(self, stops_info: str) -> int:
         """
         Parse stops information.
@@ -197,10 +245,10 @@ class GoogleFlightsFetcher:
             stops_info: String like "Nonstop", "1 stop", "2 stops"
             
         Returns:
-            Number of stops (0 for nonstop)
+            Number of stops (0 for nonstop), or -1 if unknown/unparseable
         """
         if not stops_info:
-            return 0
+            return -1  # Unknown - could not parse
         
         stops_info = stops_info.lower().strip()
         
@@ -211,7 +259,45 @@ class GoogleFlightsFetcher:
         if stops_match:
             return int(stops_match.group(1))
         
-        return 0
+        return -1  # Unknown - could not parse
+    
+    def _infer_stops_from_duration(self, origin: str, destination: str, duration_minutes: int) -> int:
+        """
+        Infer number of stops based on flight duration and route.
+        
+        This is a fallback when we can't parse stops from the HTML.
+        Uses typical direct flight durations from config.
+        
+        Args:
+            origin: Origin airport code
+            destination: Destination airport code
+            duration_minutes: Flight duration in minutes
+            
+        Returns:
+            Inferred number of stops (0 or 1+), or -1 if can't infer
+        """
+        if duration_minutes <= 0:
+            return -1
+        
+        route_key = tuple(sorted([origin.upper(), destination.upper()]))
+        
+        # Look up max direct duration from config
+        max_direct = self._max_direct_durations.get(route_key)
+        
+        if max_direct:
+            # If duration is within expected range, likely nonstop
+            if duration_minutes <= max_direct:
+                return 0
+            else:
+                # Duration too long for direct, likely has stops
+                return 1  # At least 1 stop
+        
+        # For unknown routes, use a heuristic:
+        # European short-haul direct flights rarely exceed 4 hours
+        if duration_minutes <= 240:
+            return 0  # Probably direct
+        else:
+            return 1  # Probably has stops
     
     def fetch_flight_offers(
         self,
@@ -315,13 +401,30 @@ class GoogleFlightsFetcher:
                 # Parse flight details
                 price, currency = self._parse_price(getattr(flight, 'price', ''))
                 
-                # Get stops info
-                stops_info = getattr(flight, 'stops', '')
-                stops = self._parse_stops(str(stops_info) if stops_info else 'Nonstop')
-                
-                # Get duration
+                # Get duration first (needed for stops inference)
                 duration_str = getattr(flight, 'duration', '')
                 flight_duration = self._parse_duration(str(duration_str) if duration_str else '')
+                
+                # Get stops info - now the core.py has improved selectors
+                stops_info = getattr(flight, 'stops', '')
+                stops = self._parse_stops(str(stops_info) if stops_info else '')
+                
+                # If stops couldn't be parsed, try to infer from duration
+                if stops == -1 and flight_duration > 0:
+                    stops = self._infer_stops_from_duration(origin, destination, flight_duration)
+                    if stops >= 0:
+                        logger.debug(f"Inferred stops={stops} for {origin}→{destination} ({flight_duration} min)")
+                
+                # Sanity check: if duration is very long (>6 hours) but marked as nonstop,
+                # it's likely wrong - infer from duration instead
+                if stops == 0 and flight_duration > 360:
+                    inferred = self._infer_stops_from_duration(origin, destination, flight_duration)
+                    if inferred > 0:
+                        logger.warning(
+                            f"Suspicious flight: {origin}→{destination} marked as nonstop "
+                            f"but duration is {flight_duration} min. Inferring stops={inferred}."
+                        )
+                        stops = inferred
                 
                 # Get airline
                 airline = getattr(flight, 'name', '') or 'Unknown'
@@ -509,13 +612,17 @@ def main(config_path: Optional[str] = None):
     file_prefix = output_config.get('file_prefix', 'flight_prices')
     output_file = output_dir / f'{file_prefix}_{timestamp}.csv'
     
+    # Get max direct durations from config
+    max_direct_durations = config.get('max_direct_durations', {})
+    
     try:
         # Initialize fetcher with config settings
         fetcher = GoogleFlightsFetcher(
             request_delay=fetcher_config.get('request_delay', 2.0),
             max_retries=fetcher_config.get('max_retries', 3),
             retry_delay=fetcher_config.get('retry_delay', 10),
-            mode=fetcher_config.get('mode', 'local')
+            mode=fetcher_config.get('mode', 'local'),
+            max_direct_durations=max_direct_durations
         )
         
         # Log configuration summary
