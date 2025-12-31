@@ -127,8 +127,20 @@ def parse_response(
     parser = LexborHTMLParser(r.text)
 
     if data_source == 'js':
-        script = parser.css_first(r'script.ds\:1').text()
-
+        # Try multiple selectors for the script element (Google changes these)
+        script_node = parser.css_first(r'script.ds\:1')
+        if script_node is None:
+            # Fallback: look for script containing flight data pattern
+            for script_el in parser.css('script'):
+                text = script_el.text()
+                if text and 'data:' in text and 'flights' in text.lower():
+                    script_node = script_el
+                    break
+        
+        if script_node is None:
+            raise RuntimeError("Could not find flight data script element")
+        
+        script = script_node.text()
         match = re.search(r'^.*?\{.*?data:(\[.*\]).*\}', script)
         assert match, 'Malformed js data, cannot find script data'
         data = json.loads(match.group(1))
@@ -163,8 +175,30 @@ def parse_response(
             # Get duration
             duration = safe(item.css_first("li div.Ak5kof div")).text()
 
-            # Get flight stops
-            stops = safe(item.css_first(".BbR8Ec .ogfYpf")).text()
+            # Get flight stops - try multiple selectors as Google changes these
+            stops_node = item.css_first(".BbR8Ec .ogfYpf")
+            if stops_node is None:
+                # Fallback selectors for stops info
+                stops_node = item.css_first(".EfT7Ae .ogfYpf")  # Alternative class
+            if stops_node is None:
+                stops_node = item.css_first("div.tvtJdb span.ogfYpf")  # Another alternative
+            if stops_node is None:
+                # Try to find any element with stops-related text
+                for el in item.css("span, div"):
+                    text = el.text(strip=True).lower()
+                    if text and ('nonstop' in text or 'direct' in text or ('stop' in text and 'stop' != text)):
+                        stops_node = el
+                        break
+            if stops_node is None:
+                # Last resort: look in the middle column where stops usually appear
+                # The structure is typically: times | duration+stops | price
+                middle_divs = item.css("div.Ak5kof span, div.BbR8Ec span, div.EfT7Ae span")
+                for el in middle_divs:
+                    text = el.text(strip=True)
+                    if text and ('Nonstop' in text or 'stop' in text or 'Direct' in text):
+                        stops_node = el
+                        break
+            stops = safe(stops_node).text()
 
             # Get delay
             delay = safe(item.css_first(".GsCCve")).text() or None
