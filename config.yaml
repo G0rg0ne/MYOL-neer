@@ -36,13 +36,10 @@ search:
 # Date Range Settings
 date_range:
   # Days from today to start searching
-  start_days: 60
+  start_date: "15-01-2026"
   
   # Days from today to end searching
-  end_days: 67
-  
-  # Day interval between search dates
-  step: 1
+  end_date: "31-01-2026"
 
 # Routes to Search
 # Format: list of [origin, destination] airport codes (IATA)
@@ -54,19 +51,6 @@ routes:
   # Add more routes as needed:
   # - ["MAD", "BCN"]  # Madrid to Barcelona
   # - ["FRA", "LHR"]  # Frankfurt to London
-
-# Max Direct Flight Durations (in minutes)
-# Used to infer stops when HTML parsing fails.
-# Format: "AIRPORT1-AIRPORT2": max_minutes
-# Note: Order doesn't matter (CDG-AMS = AMS-CDG)
-max_direct_durations:
-  "AMS-CDG": 100   # ~1h15 + buffer
-  "CDG-MAD": 160   # ~2h10 + buffer
-  "CDG-LHR": 110   # ~1h20 + buffer
-  "AMS-LHR": 100   # ~1h10 + buffer
-  "ATH-CDG": 210   # ~3h + buffer
-  "FRA-LHR": 120
-  "BCN-MAD": 100
 
 # Output Settings
 output:
