@@ -44,6 +44,7 @@ config:
     max_retries: 3
     retry_delay: 10
     mode: "local"
+    max_concurrent: 5
   
   search:
     max_offers_per_search: 4
