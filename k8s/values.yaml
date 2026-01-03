@@ -43,7 +43,8 @@ config:
     request_delay: 0.5
     max_retries: 3
     retry_delay: 10
-    max_concurrent: 5
+    max_concurrent: 5  
+    batch_size: 100
     mode: "local"
   
   search:

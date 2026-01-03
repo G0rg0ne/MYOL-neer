@@ -97,7 +97,6 @@ class GoogleFlightsFetcher:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: float = DEFAULT_RETRY_DELAY,
         mode: str = "local",
-        max_direct_durations: Optional[dict] = None,
         max_concurrent: int = DEFAULT_MAX_CONCURRENT
     ):
         """
@@ -110,8 +109,6 @@ class GoogleFlightsFetcher:
             mode: fast-flights mode for get_flights_from_filter:
                 - "common": Direct HTTP requests (fastest, may hit consent walls)
                 - "local": Uses local Playwright browser (handles JS, slower)
-            max_direct_durations: Dict mapping route keys to max direct flight duration in minutes.
-                Format: {"AMS-CDG": 100, "CDG-MAD": 160, ...}
             max_concurrent: Maximum number of parallel requests (default 3)
         """
         self.request_delay = request_delay
@@ -635,12 +632,15 @@ class GoogleFlightsFetcher:
         departure_dates: list[str],
         seat_class: str = 'economy',
         adults: int = 1,
-        max_offers_per_search: int = 50
+        max_offers_per_search: int = 50,
+        output_path: Optional[str] = None,
+        batch_size: int = 50
     ) -> list[dict]:
         """
         Async version: Fetch flight offers for multiple routes and dates with concurrency control.
         
         Uses semaphore to limit parallel requests and maintains rate limiting per context.
+        Supports streaming to CSV file to reduce memory usage.
         
         Args:
             routes: List of (origin, destination) tuples
@@ -648,14 +648,21 @@ class GoogleFlightsFetcher:
             seat_class: Seat class filter
             adults: Number of adult passengers
             max_offers_per_search: Max offers per individual search
+            output_path: Optional path to CSV file for streaming writes. If provided, 
+                        results are written incrementally in batches to reduce memory usage.
+            batch_size: Number of queries to process before writing to CSV (only used if output_path is provided)
             
         Returns:
-            Combined list of all flight offers
+            Combined list of all flight offers (empty if output_path is provided for streaming)
         """
-        all_offers = []
+        all_offers = [] if output_path is None else None
         total_queries = len(routes) * len(departure_dates)
         
         logger.info(f"Starting {total_queries} queries ({len(routes)} routes × {len(departure_dates)} dates) with max_concurrent={self.max_concurrent}")
+        if output_path:
+            logger.info(f"Streaming mode enabled: writing to {output_path} in batches of {batch_size}")
+            # Initialize CSV file with headers
+            self._init_csv_file(output_path)
         
         # Initialize global browser session for local mode (will be reused across threads)
         session = None
@@ -701,21 +708,55 @@ class GoogleFlightsFetcher:
                 task = fetch_single_query(origin, destination, date, query_num)
                 tasks.append(task)
         
-        # Execute all tasks concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Collect results and handle exceptions
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Task {i+1} failed: {result}")
-            else:
-                all_offers.extend(result)
+        # Process in batches if streaming, otherwise process all at once
+        if output_path:
+            # Batch processing with streaming writes
+            total_offers = 0
+            for i in range(0, len(tasks), batch_size):
+                batch = tasks[i:i + batch_size]
+                batch_num = (i // batch_size) + 1
+                total_batches = (len(tasks) + batch_size - 1) // batch_size
+                
+                logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} queries)")
+                
+                # Execute batch
+                results = await asyncio.gather(*batch, return_exceptions=True)
+                
+                # Collect and write batch results
+                batch_offers = []
+                for j, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Task {i+j+1} failed: {result}")
+                    else:
+                        batch_offers.extend(result)
+                
+                # Stream batch to CSV
+                if batch_offers:
+                    self.append_offers_to_csv(batch_offers, output_path)
+                    total_offers += len(batch_offers)
+                    logger.info(f"Batch {batch_num} complete: {len(batch_offers)} offers written (total: {total_offers})")
+                
+                # Memory is freed after each batch
+        else:
+            # Original behavior: process all at once
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Collect results and handle exceptions
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Task {i+1} failed: {result}")
+                else:
+                    all_offers.extend(result)
         
         # Note: We don't close the global session here as it may be reused
         # The session will be cleaned up when the process exits
         
-        logger.info(f"Completed all queries. Total offers collected: {len(all_offers)}")
-        return all_offers
+        if output_path:
+            logger.info(f"Completed all queries. Results streamed to {output_path}")
+            return []  # Return empty list when streaming
+        else:
+            logger.info(f"Completed all queries. Total offers collected: {len(all_offers)}")
+            return all_offers
     
     def save_to_csv(
         self,
@@ -754,6 +795,57 @@ class GoogleFlightsFetcher:
         
         logger.info(f"Saved {len(offers)} offers to {output_path}")
         return output_path
+    
+    def _init_csv_file(self, output_path: str) -> Path:
+        """
+        Initialize CSV file with headers if it doesn't exist.
+        
+        Args:
+            output_path: Path to output CSV file
+            
+        Returns:
+            Path object to the output file
+        """
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        if not output_file.exists():
+            with open(output_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=self.SCHEMA)
+                writer.writeheader()
+            logger.debug(f"Initialized CSV file: {output_path}")
+        
+        return output_file
+    
+    def append_offers_to_csv(
+        self,
+        offers: list[dict],
+        output_path: str
+    ) -> None:
+        """
+        Append flight offers to an existing CSV file (streaming write).
+        
+        This method is optimized for incremental writes to reduce memory usage.
+        
+        Args:
+            offers: List of flight offer dictionaries to append
+            output_path: Path to output CSV file
+        """
+        if not offers:
+            return
+        
+        output_file = Path(output_path)
+        
+        # Ensure file exists with headers
+        if not output_file.exists():
+            self._init_csv_file(output_path)
+        
+        # Append offers
+        with open(output_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=self.SCHEMA)
+            writer.writerows(offers)
+        
+        logger.debug(f"Appended {len(offers)} offers to {output_path}")
     
     def upload_to_s3(
         self,
@@ -904,9 +996,6 @@ def main(config_path: Optional[str] = None):
     file_prefix = output_config.get('file_prefix', 'flight_prices')
     output_file = output_dir / f'{file_prefix}_{timestamp}.csv'
     
-    # Get max direct durations from config
-    max_direct_durations = config.get('max_direct_durations', {})
-    
     try:
         # Initialize fetcher with config settings
         fetcher = GoogleFlightsFetcher(
@@ -914,7 +1003,6 @@ def main(config_path: Optional[str] = None):
             max_retries=fetcher_config.get('max_retries', 3),
             retry_delay=fetcher_config.get('retry_delay', 10),
             mode=fetcher_config.get('mode', 'local'),
-            max_direct_durations=max_direct_durations,
             max_concurrent=fetcher_config.get('max_concurrent', 3)
         )
         
@@ -925,20 +1013,29 @@ def main(config_path: Optional[str] = None):
         logger.info(f"Max offers per search: {search_config.get('max_offers_per_search', 20)}")
         logger.info(f"Max concurrent requests: {fetcher.max_concurrent}")
         
-        # Fetch all offers using async version for better performance
+        # Get batch size for streaming (default: 50)
+        batch_size = fetcher_config.get('batch_size', 50)
+        
+        # Fetch all offers using async version with streaming to CSV
         all_offers = asyncio.run(fetcher.fetch_multiple_routes_async(
             routes=routes,
             departure_dates=departure_dates,
             seat_class=search_config.get('seat_class', 'economy'),
             adults=search_config.get('adults', 1),
-            max_offers_per_search=search_config.get('max_offers_per_search', 20)
+            max_offers_per_search=search_config.get('max_offers_per_search', 20),
+            output_path=str(output_file),  # Enable streaming mode
+            batch_size=batch_size
         ))
         
-        # Save to CSV
-        if all_offers:
-            fetcher.save_to_csv(all_offers, str(output_file))
+        # Check if file was created and has content
+        output_file_path = Path(output_file)
+        if output_file_path.exists() and output_file_path.stat().st_size > 0:
+            # Count records in the file (subtract 1 for header)
+            with open(output_file_path, 'r', encoding='utf-8') as f:
+                record_count = sum(1 for line in f) - 1  # Subtract header line
+            
             print(f"\n✓ Dataset saved to: {output_file}")
-            print(f"  Total records: {len(all_offers)}")
+            print(f"  Total records: {record_count}")
             
             # Upload to S3 if enabled
             if s3_config.get('enabled', False):
@@ -954,7 +1051,7 @@ def main(config_path: Optional[str] = None):
                     region=region,
                     prefix=prefix
                 ):
-                    print(f"✓ Dataset uploaded to S3: s3://{bucket}/{prefix}{output_file.name}")
+                    print(f"✓ Dataset uploaded to S3: s3://{bucket}/{prefix}{output_file_path.name}")
                 else:
                     print(f"✗ Failed to upload dataset to S3")
         else:
