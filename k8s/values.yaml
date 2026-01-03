@@ -19,10 +19,10 @@ cronjob:
 # Resource limits and requests
 resources:
   requests:
-    memory: "512Mi"
-    cpu: "250m"
+    memory: "1Gi"
+    cpu: "500m"
   limits:
-    memory: "2Gi"  # Playwright needs memory
+    memory: "3Gi"
     cpu: "1500m"
 
 # Node selector
