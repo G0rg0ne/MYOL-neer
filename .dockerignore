@@ -1,0 +1,30 @@
+# Local config (mounted via ConfigMap in K8s)
+config.yaml
+
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.pyo
+.venv
+venv
+.env
+
+# Data files
+data/
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# K8s/Helm
+k8s/
+
+# Docs
+README.md
+assets/
+
