@@ -113,3 +113,22 @@ def local_playwright_fetch(params: dict, session: Optional[PlaywrightSession] = 
         text_markdown = body
 
     return DummyResponse
+
+
+async def local_playwright_fetch_async(params: dict, session: Optional[PlaywrightSession] = None) -> Any:
+    """Async version: Fetch flight data using Playwright without blocking the event loop."""
+    url = "https://www.google.com/travel/flights?" + "&".join(f"{k}={v}" for k, v in params.items())
+    
+    if session:
+        body = await session.fetch(url)
+    else:
+        global_session = get_global_session()
+        await global_session.initialize()  # Ensure initialized
+        body = await global_session.fetch(url)
+
+    class DummyResponse:
+        status_code = 200
+        text = body
+        text_markdown = body
+
+    return DummyResponse

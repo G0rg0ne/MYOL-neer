@@ -106,6 +106,34 @@ def get_flights(
     )
 
 
+async def get_flights_from_filter_async(
+    filter: TFSData,
+    currency: str = "",
+    *,
+    session=None,
+    data_source: DataSource = 'html',
+) -> Union[Result, DecodedResult, None]:
+    """
+    Async version of get_flights_from_filter for use with local Playwright.
+    
+    This keeps everything in the same event loop, avoiding cross-loop issues.
+    """
+    from .local_playwright import local_playwright_fetch_async
+    
+    data = filter.as_b64()
+
+    params = {
+        "tfs": data.decode("utf-8"),
+        "hl": "en",
+        "tfu": "EgQIABABIgA",
+        "curr": currency,
+    }
+
+    res = await local_playwright_fetch_async(params, session=session)
+
+    return parse_response(res, data_source)
+
+
 def parse_response(
     r: Response,
     data_source: DataSource,

@@ -21,6 +21,7 @@ import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 
 from fast_flights import FlightData, Passengers, create_filter, get_flights_from_filter
+from fast_flights.core import get_flights_from_filter_async
 from fast_flights.local_playwright import PlaywrightSession
 
 
@@ -546,16 +547,22 @@ class GoogleFlightsFetcher:
             result = None
             for attempt in range(self.max_retries + 1):
                 try:
-                    # For async execution, use executor to run synchronous get_flights_from_filter
-                    # This avoids event loop conflicts while still benefiting from parallelization
-                    loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(
-                        None,
-                        lambda: get_flights_from_filter(
+                    # Use async version for local mode to stay in the same event loop
+                    if self.mode == "local":
+                        result = await get_flights_from_filter_async(
                             flight_filter,
-                            mode=self.mode,
+                            session=session,
                         )
-                    )
+                    else:
+                        # For other modes, use executor to run synchronous version
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(
+                            None,
+                            lambda: get_flights_from_filter(
+                                flight_filter,
+                                mode=self.mode,
+                            )
+                        )
                     break  # Success, exit retry loop
                 except Exception as e:
                     if attempt < self.max_retries:

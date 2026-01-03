@@ -40,11 +40,11 @@ pvc:
 # Flight fetcher configuration
 config:
   fetcher:
-    request_delay: 2.0
+    request_delay: 0.5
     max_retries: 3
     retry_delay: 10
-    mode: "local"
     max_concurrent: 5
+    mode: "local"
   
   search:
     max_offers_per_search: 4
