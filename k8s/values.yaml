@@ -40,7 +40,7 @@ pvc:
 # Flight fetcher configuration
 config:
   fetcher:
-    request_delay: 0.5
+    request_delay: 0.4
     max_retries: 3
     retry_delay: 10
     max_concurrent: 5  
@@ -56,7 +56,7 @@ config:
   
   date_range:
     start_date: "15-01-2026"
-    end_date: "30-01-2026"
+    end_date: "01-06-2026"
   
   routes:
     - ["CDG", "AMS"]
