@@ -9,11 +9,11 @@ image:
 
 # CronJob configuration
 cronjob:
-  schedule: "0 10 * * *"  # Every day at 10 am
-  concurrencyPolicy: Forbid  # Don't run if previous job still running
+  schedule: "0 12 * * *"  
+  concurrencyPolicy: Forbid 
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
-  backoffLimit: 4  # Retry up to 4 times on failure
+  backoffLimit: 4  
   restartPolicy: OnFailure
 
 # Resource limits and requests
@@ -40,7 +40,7 @@ pvc:
 # Flight fetcher configuration
 config:
   fetcher:
-    request_delay: 0.4
+    request_delay: 0.5
     max_retries: 3
     retry_delay: 10
     max_concurrent: 5  
