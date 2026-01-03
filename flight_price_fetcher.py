@@ -1028,7 +1028,7 @@ def main(config_path: Optional[str] = None):
         
         # Log configuration summary
         logger.info(f"Routes: {len(routes)}")
-        logger.info(f"Date range: {date_config.get('start_date', '01-01-2026')}-{date_config.get('end_date', '07-01-2026')}")
+        logger.info(f"Date range: {date_config.get('start_date', '01-01-2026')} to {date_config.get('end_date', '07-01-2026')}")
         logger.info(f"Seat class: {search_config.get('seat_class', 'economy')}")
         logger.info(f"Max offers per search: {search_config.get('max_offers_per_search', 20)}")
         logger.info(f"Max concurrent requests: {fetcher.max_concurrent}")
