@@ -12,6 +12,7 @@ import time
 import logging
 import re
 import asyncio
+import gc
 from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
@@ -736,7 +737,11 @@ class GoogleFlightsFetcher:
                     total_offers += len(batch_offers)
                     logger.info(f"Batch {batch_num} complete: {len(batch_offers)} offers written (total: {total_offers})")
                 
-                # Memory is freed after each batch
+                # Explicitly free memory after each batch
+                del batch_offers
+                del results
+                # Force garbage collection to free memory immediately
+                gc.collect()
         else:
             # Original behavior: process all at once
             results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -13,6 +13,7 @@ data:
       max_retries: {{ .Values.config.fetcher.max_retries }}
       retry_delay: {{ .Values.config.fetcher.retry_delay }}
       max_concurrent: {{ .Values.config.fetcher.max_concurrent }}
+      batch_size: {{ .Values.config.fetcher.batch_size }}
       mode: {{ .Values.config.fetcher.mode | quote }}
 
     search:
