@@ -16,6 +16,11 @@ fetcher:
   # - "common": Direct HTTP requests (fastest, may hit consent walls)
   # - "local": Uses local Playwright browser (handles JS, slower)
   mode: "local"
+  
+  # Maximum number of parallel requests (concurrency control)
+  # Conservative: 2, Moderate: 3, Aggressive: 5
+  # Higher values = faster but higher risk of rate limiting
+  max_concurrent: 5
 
 # Search Parameters
 search:

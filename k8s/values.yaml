@@ -54,7 +54,7 @@ config:
   
   date_range:
     start_date: "15-01-2026"
-    end_date: "16-01-2026"
+    end_date: "01-05-2026"
   
   routes:
     - ["CDG", "AMS"]

@@ -11,6 +11,7 @@ import os
 import time
 import logging
 import re
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
@@ -20,6 +21,7 @@ import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 
 from fast_flights import FlightData, Passengers, create_filter, get_flights_from_filter
+from fast_flights.local_playwright import PlaywrightSession
 
 
 def load_config(config_path: Optional[str] = None) -> dict:
@@ -78,6 +80,7 @@ class GoogleFlightsFetcher:
     DEFAULT_REQUEST_DELAY = 2.0  # seconds between requests (be respectful to Google)
     DEFAULT_MAX_RETRIES = 3
     DEFAULT_RETRY_DELAY = 10  # seconds before retry on error
+    DEFAULT_MAX_CONCURRENT = 3  # maximum parallel requests
     
     # Seat class mapping
     SEAT_CLASSES = {
@@ -93,7 +96,8 @@ class GoogleFlightsFetcher:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: float = DEFAULT_RETRY_DELAY,
         mode: str = "local",
-        max_direct_durations: Optional[dict] = None
+        max_direct_durations: Optional[dict] = None,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT
     ):
         """
         Initialize the Google Flights fetcher.
@@ -107,14 +111,16 @@ class GoogleFlightsFetcher:
                 - "local": Uses local Playwright browser (handles JS, slower)
             max_direct_durations: Dict mapping route keys to max direct flight duration in minutes.
                 Format: {"AMS-CDG": 100, "CDG-MAD": 160, ...}
+            max_concurrent: Maximum number of parallel requests (default 3)
         """
         self.request_delay = request_delay
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.mode = mode
+        self.max_concurrent = max_concurrent
         self._last_request_time = 0.0
         
-        logger.info(f"Google Flights fetcher initialized (delay: {request_delay}s, mode: {mode})")
+        logger.info(f"Google Flights fetcher initialized (delay: {request_delay}s, mode: {mode}, max_concurrent: {max_concurrent})")
     
     
     def _wait_for_rate_limit(self) -> None:
@@ -448,6 +454,262 @@ class GoogleFlightsFetcher:
         logger.info(f"Completed all queries. Total offers collected: {len(all_offers)}")
         return all_offers
     
+    async def _async_rate_limiter(self, last_request_time: dict) -> None:
+        """Async rate limiter that respects request_delay between requests."""
+        current_time = time.time()
+        elapsed = current_time - last_request_time.get('time', 0)
+        if elapsed < self.request_delay:
+            sleep_time = self.request_delay - elapsed
+            await asyncio.sleep(sleep_time)
+        last_request_time['time'] = time.time()
+    
+    async def fetch_flight_offers_async(
+        self,
+        origin: str,
+        destination: str,
+        departure_date: str,
+        session: Optional[PlaywrightSession] = None,
+        rate_limiter_state: Optional[dict] = None,
+        adults: int = 1,
+        children: int = 0,
+        seat_class: str = 'economy',
+        max_offers: int = 50
+    ) -> list[dict]:
+        """
+        Async version of fetch_flight_offers that supports concurrent execution.
+        
+        Args:
+            origin: IATA airport code (e.g., 'JFK')
+            destination: IATA airport code (e.g., 'LAX')
+            departure_date: Date in YYYY-MM-DD format
+            session: Optional PlaywrightSession for browser reuse
+            rate_limiter_state: Optional dict to track rate limiting per context
+            adults: Number of adult passengers
+            children: Number of child passengers
+            seat_class: Seat class (economy, premium-economy, business, first)
+            max_offers: Maximum number of offers to retrieve
+            
+        Returns:
+            List of structured flight offer dictionaries
+        """
+        query_date = datetime.now().strftime('%Y-%m-%d')
+        departure_dt = datetime.strptime(departure_date, '%Y-%m-%d')
+        query_dt = datetime.strptime(query_date, '%Y-%m-%d')
+        days_before = (departure_dt - query_dt).days
+        
+        # Skip past dates
+        if days_before < 0:
+            logger.warning(f"Skipping past date: {departure_date}")
+            return []
+        
+        try:
+            logger.info(f"Fetching flights: {origin} → {destination} on {departure_date}")
+            
+            # Rate limiting: wait between requests (per context if provided)
+            if rate_limiter_state is not None:
+                await self._async_rate_limiter(rate_limiter_state)
+            else:
+                # Fallback to synchronous rate limiting
+                self._wait_for_rate_limit()
+            
+            # Prepare flight data
+            flight_data = FlightData(
+                date=departure_date,
+                from_airport=origin.upper(),
+                to_airport=destination.upper()
+            )
+            
+            # Prepare passengers
+            passengers = Passengers(
+                adults=adults,
+                children=children,
+                infants_in_seat=0,
+                infants_on_lap=0
+            )
+            
+            # Normalize seat class
+            seat = seat_class.lower() if seat_class else 'economy'
+            if seat not in self.SEAT_CLASSES:
+                seat = 'economy'
+            
+            cabin_label = self.SEAT_CLASSES[seat]
+            
+            # Create filter
+            flight_filter = create_filter(
+                flight_data=[flight_data],
+                trip="one-way",
+                passengers=passengers,
+                seat=seat,
+            )
+            
+            # Make request with retry logic
+            result = None
+            for attempt in range(self.max_retries + 1):
+                try:
+                    # For async execution, use executor to run synchronous get_flights_from_filter
+                    # This avoids event loop conflicts while still benefiting from parallelization
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(
+                        None,
+                        lambda: get_flights_from_filter(
+                            flight_filter,
+                            mode=self.mode,
+                        )
+                    )
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    if attempt < self.max_retries:
+                        wait_time = self.retry_delay * (2 ** attempt)  # Exponential backoff
+                        logger.warning(
+                            f"Request failed, waiting {wait_time}s before retry "
+                            f"({attempt + 1}/{self.max_retries}): {e}"
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"Max retries exceeded: {e}")
+                        raise
+            
+            if result is None or not hasattr(result, 'flights') or not result.flights:
+                logger.warning(f"No flights found for {origin}→{destination} on {departure_date}")
+                return []
+            
+            offers = []
+            for rank, flight in enumerate(result.flights[:max_offers], start=1):
+                # Parse flight details
+                price, currency = self._parse_price(getattr(flight, 'price', ''))
+                
+                # Get duration first (needed for stops inference)
+                duration_str = getattr(flight, 'duration', '')
+                flight_duration = self._parse_duration(str(duration_str) if duration_str else '')
+                
+                # Get stops info
+                stops_info = getattr(flight, 'stops', None)
+                stops = self._parse_stops(stops_info)
+                
+                # Get airline
+                airline = getattr(flight, 'name', '') or 'Unknown'
+                if airline and ',' in airline:
+                    airline = airline.split(',')[0].strip()
+                
+                # Get times
+                departure_time = getattr(flight, 'departure', '') or ''
+                arrival_time = getattr(flight, 'arrival', '') or ''
+                
+                offer_data = {
+                    'origin': origin.upper(),
+                    'destination': destination.upper(),
+                    'departure_date': departure_date,
+                    'query_date': query_date,
+                    'days_before_departure': days_before,
+                    'airline': airline,
+                    'price': price,
+                    'currency': currency,
+                    'stops': stops,
+                    'flight_duration': flight_duration,
+                    'cabin': cabin_label,
+                    'offer_rank': rank,
+                    'departure_time': departure_time,
+                    'arrival_time': arrival_time,
+                    'source': 'google_flights'
+                }
+                offers.append(offer_data)
+            
+            logger.info(f"Retrieved {len(offers)} flight offers")
+            return offers
+            
+        except Exception as e:
+            logger.error(f"Error fetching flight offers: {e}")
+            return []
+    
+    async def fetch_multiple_routes_async(
+        self,
+        routes: list[tuple[str, str]],
+        departure_dates: list[str],
+        seat_class: str = 'economy',
+        adults: int = 1,
+        max_offers_per_search: int = 50
+    ) -> list[dict]:
+        """
+        Async version: Fetch flight offers for multiple routes and dates with concurrency control.
+        
+        Uses semaphore to limit parallel requests and maintains rate limiting per context.
+        
+        Args:
+            routes: List of (origin, destination) tuples
+            departure_dates: List of departure dates in YYYY-MM-DD format
+            seat_class: Seat class filter
+            adults: Number of adult passengers
+            max_offers_per_search: Max offers per individual search
+            
+        Returns:
+            Combined list of all flight offers
+        """
+        all_offers = []
+        total_queries = len(routes) * len(departure_dates)
+        
+        logger.info(f"Starting {total_queries} queries ({len(routes)} routes × {len(departure_dates)} dates) with max_concurrent={self.max_concurrent}")
+        
+        # Initialize global browser session for local mode (will be reused across threads)
+        session = None
+        if self.mode == "local":
+            from fast_flights.local_playwright import get_global_session
+            session = get_global_session()
+            # Initialize browser upfront to avoid delay on first request
+            await session.initialize()
+        
+        # Semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+        
+        # Rate limiter state per concurrent context
+        rate_limiter_states = [{'time': 0.0} for _ in range(self.max_concurrent)]
+        
+        async def fetch_single_query(origin: str, destination: str, date: str, query_num: int) -> list[dict]:
+            """Fetch a single route/date combination with concurrency control."""
+            async with semaphore:
+                # Get rate limiter state for this context
+                context_idx = query_num % self.max_concurrent
+                rate_state = rate_limiter_states[context_idx]
+                
+                logger.info(f"Progress: {query_num}/{total_queries} queries")
+                
+                offers = await self.fetch_flight_offers_async(
+                    origin=origin,
+                    destination=destination,
+                    departure_date=date,
+                    session=session,
+                    rate_limiter_state=rate_state,
+                    adults=adults,
+                    seat_class=seat_class,
+                    max_offers=max_offers_per_search
+                )
+                return offers
+        
+        # Create all tasks
+        tasks = []
+        query_num = 0
+        for origin, destination in routes:
+            for date in departure_dates:
+                query_num += 1
+                task = fetch_single_query(origin, destination, date, query_num)
+                tasks.append(task)
+        
+        # Execute all tasks concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Collect results and handle exceptions
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Task {i+1} failed: {result}")
+            else:
+                all_offers.extend(result)
+        
+        # Note: We don't close the global session here as it may be reused
+        # The session will be cleaned up when the process exits
+        
+        logger.info(f"Completed all queries. Total offers collected: {len(all_offers)}")
+        return all_offers
+    
     def save_to_csv(
         self,
         offers: list[dict],
@@ -645,7 +907,8 @@ def main(config_path: Optional[str] = None):
             max_retries=fetcher_config.get('max_retries', 3),
             retry_delay=fetcher_config.get('retry_delay', 10),
             mode=fetcher_config.get('mode', 'local'),
-            max_direct_durations=max_direct_durations
+            max_direct_durations=max_direct_durations,
+            max_concurrent=fetcher_config.get('max_concurrent', 3)
         )
         
         # Log configuration summary
@@ -653,15 +916,16 @@ def main(config_path: Optional[str] = None):
         logger.info(f"Date range: {date_config.get('start_days', 7)}-{date_config.get('end_days', 60)} days, step={date_config.get('step', 7)}")
         logger.info(f"Seat class: {search_config.get('seat_class', 'economy')}")
         logger.info(f"Max offers per search: {search_config.get('max_offers_per_search', 20)}")
+        logger.info(f"Max concurrent requests: {fetcher.max_concurrent}")
         
-        # Fetch all offers
-        all_offers = fetcher.fetch_multiple_routes(
+        # Fetch all offers using async version for better performance
+        all_offers = asyncio.run(fetcher.fetch_multiple_routes_async(
             routes=routes,
             departure_dates=departure_dates,
             seat_class=search_config.get('seat_class', 'economy'),
             adults=search_config.get('adults', 1),
             max_offers_per_search=search_config.get('max_offers_per_search', 20)
-        )
+        ))
         
         # Save to CSV
         if all_offers:
