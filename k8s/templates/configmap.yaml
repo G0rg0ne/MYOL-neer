@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "flight-fetcher.fullname" . }}-config
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "flight-fetcher.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # Flight Price Fetcher Configuration
+    fetcher:
+      request_delay: {{ .Values.config.fetcher.request_delay }}
+      max_retries: {{ .Values.config.fetcher.max_retries }}
+      retry_delay: {{ .Values.config.fetcher.retry_delay }}
+      mode: {{ .Values.config.fetcher.mode | quote }}
+
+    search:
+      max_offers_per_search: {{ .Values.config.search.max_offers_per_search }}
+      seat_class: {{ .Values.config.search.seat_class | quote }}
+      adults: {{ .Values.config.search.adults }}
+      children: {{ .Values.config.search.children }}
+      currency: {{ .Values.config.search.currency | quote }}
+
+    date_range:
+      start_date: {{ .Values.config.date_range.start_date | quote }}
+      end_date: {{ .Values.config.date_range.end_date | quote }}
+
+    routes:
+{{- range .Values.config.routes }}
+      - {{ . | toJson }}
+{{- end }}
+
+    output:
+      directory: {{ .Values.config.output.directory | quote }}
+      file_prefix: {{ .Values.config.output.file_prefix | quote }}
+
+    s3:
+      enabled: {{ .Values.s3.enabled }}
+      endpoint_url: {{ .Values.s3.endpoint_url | quote }}
+      bucket: {{ .Values.s3.bucket | quote }}
+      region: {{ .Values.s3.region | quote }}
+      prefix: {{ .Values.s3.prefix | quote }}
+

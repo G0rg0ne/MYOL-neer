@@ -7,6 +7,7 @@ and builds a dataset with standardized schema for price analysis.
 """
 
 import csv
+import os
 import time
 import logging
 import re
@@ -15,6 +16,8 @@ from typing import Optional
 from pathlib import Path
 
 import yaml
+import boto3
+from botocore.exceptions import ClientError, BotoCoreError
 
 from fast_flights import FlightData, Passengers, create_filter, get_flights_from_filter
 
@@ -110,28 +113,9 @@ class GoogleFlightsFetcher:
         self.retry_delay = retry_delay
         self.mode = mode
         self._last_request_time = 0.0
-        self._max_direct_durations = self._parse_duration_config(max_direct_durations or {})
         
         logger.info(f"Google Flights fetcher initialized (delay: {request_delay}s, mode: {mode})")
     
-    def _parse_duration_config(self, config_durations: dict) -> dict:
-        """
-        Parse duration config from YAML format to internal tuple-key format.
-        
-        Args:
-            config_durations: Dict like {"AMS-CDG": 100, "CDG-MAD": 160}
-            
-        Returns:
-            Dict like {("AMS", "CDG"): 100, ("CDG", "MAD"): 160}
-        """
-        parsed = {}
-        for route_str, duration in config_durations.items():
-            parts = route_str.upper().split('-')
-            if len(parts) == 2:
-                # Sort to make lookup order-independent
-                key = tuple(sorted(parts))
-                parsed[key] = duration
-        return parsed
     
     def _wait_for_rate_limit(self) -> None:
         """Wait to respect rate limiting between requests."""
@@ -237,67 +221,42 @@ class GoogleFlightsFetcher:
         except Exception:
             return f"{hour}:{minute:02d}"
     
-    def _parse_stops(self, stops_info: str) -> int:
+    def _parse_stops(self, stops_info) -> int:
         """
         Parse stops information.
         
         Args:
-            stops_info: String like "Nonstop", "1 stop", "2 stops"
+            stops_info: Integer (already parsed), or string like "Nonstop", "1 stop", "2 stops"
             
         Returns:
             Number of stops (0 for nonstop), or -1 if unknown/unparseable
         """
+        # If already an integer, return directly (core.py already parses this)
+        if isinstance(stops_info, int):
+            return stops_info
+        
         if not stops_info:
             return -1  # Unknown - could not parse
         
-        stops_info = stops_info.lower().strip()
+        # Convert to string and check if it's just a number
+        stops_str = str(stops_info).strip()
+        if stops_str.isdigit():
+            return int(stops_str)
         
-        if 'nonstop' in stops_info or 'direct' in stops_info:
+        stops_str = stops_str.lower()
+        
+        if 'nonstop' in stops_str or 'direct' in stops_str:
             return 0
         
-        stops_match = re.search(r'(\d+)\s*stop', stops_info)
+        if stops_str == 'unknown':
+            return -1
+        
+        stops_match = re.search(r'(\d+)\s*stop', stops_str)
         if stops_match:
             return int(stops_match.group(1))
         
         return -1  # Unknown - could not parse
     
-    def _infer_stops_from_duration(self, origin: str, destination: str, duration_minutes: int) -> int:
-        """
-        Infer number of stops based on flight duration and route.
-        
-        This is a fallback when we can't parse stops from the HTML.
-        Uses typical direct flight durations from config.
-        
-        Args:
-            origin: Origin airport code
-            destination: Destination airport code
-            duration_minutes: Flight duration in minutes
-            
-        Returns:
-            Inferred number of stops (0 or 1+), or -1 if can't infer
-        """
-        if duration_minutes <= 0:
-            return -1
-        
-        route_key = tuple(sorted([origin.upper(), destination.upper()]))
-        
-        # Look up max direct duration from config
-        max_direct = self._max_direct_durations.get(route_key)
-        
-        if max_direct:
-            # If duration is within expected range, likely nonstop
-            if duration_minutes <= max_direct:
-                return 0
-            else:
-                # Duration too long for direct, likely has stops
-                return 1  # At least 1 stop
-        
-        # For unknown routes, use a heuristic:
-        # European short-haul direct flights rarely exceed 4 hours
-        if duration_minutes <= 240:
-            return 0  # Probably direct
-        else:
-            return 1  # Probably has stops
     
     def fetch_flight_offers(
         self,
@@ -405,27 +364,9 @@ class GoogleFlightsFetcher:
                 duration_str = getattr(flight, 'duration', '')
                 flight_duration = self._parse_duration(str(duration_str) if duration_str else '')
                 
-                # Get stops info - now the core.py has improved selectors
-                stops_info = getattr(flight, 'stops', '')
-                stops = self._parse_stops(str(stops_info) if stops_info else '')
-                
-                # If stops couldn't be parsed, try to infer from duration
-                if stops == -1 and flight_duration > 0:
-                    stops = self._infer_stops_from_duration(origin, destination, flight_duration)
-                    if stops >= 0:
-                        logger.debug(f"Inferred stops={stops} for {origin}→{destination} ({flight_duration} min)")
-                
-                # Sanity check: if duration is very long (>6 hours) but marked as nonstop,
-                # it's likely wrong - infer from duration instead
-                if stops == 0 and flight_duration > 360:
-                    inferred = self._infer_stops_from_duration(origin, destination, flight_duration)
-                    if inferred > 0:
-                        logger.warning(
-                            f"Suspicious flight: {origin}→{destination} marked as nonstop "
-                            f"but duration is {flight_duration} min. Inferring stops={inferred}."
-                        )
-                        stops = inferred
-                
+                # Get stops info - core.py returns int (0, 1, 2...) or "Unknown"
+                stops_info = getattr(flight, 'stops', None)
+                stops = self._parse_stops(stops_info)
                 # Get airline
                 airline = getattr(flight, 'name', '') or 'Unknown'
                 # Clean up airline name - just get the carrier code or short name
@@ -544,9 +485,90 @@ class GoogleFlightsFetcher:
         
         logger.info(f"Saved {len(offers)} offers to {output_path}")
         return output_path
+    
+    def upload_to_s3(
+        self,
+        file_path: str,
+        bucket: str,
+        endpoint_url: Optional[str] = None,
+        region: str = "us-east-1",
+        prefix: str = "",
+        access_key_id: Optional[str] = None,
+        secret_access_key: Optional[str] = None
+    ) -> bool:
+        """
+        Upload a file to S3 or S3-compatible storage.
+        
+        Args:
+            file_path: Local path to the file to upload
+            bucket: S3 bucket name
+            endpoint_url: Custom S3 endpoint URL (e.g., http://minio:9000). 
+                         If None, uses AWS S3.
+            region: AWS region (required even for custom endpoints)
+            prefix: Optional key prefix in bucket (e.g., "prices/")
+            access_key_id: AWS access key ID (from env var if not provided)
+            secret_access_key: AWS secret access key (from env var if not provided)
+            
+        Returns:
+            True if upload successful, False otherwise
+        """
+        file_path_obj = Path(file_path)
+        if not file_path_obj.exists():
+            logger.error(f"File not found: {file_path}")
+            return False
+        
+        # Get credentials from parameters or environment variables
+        aws_access_key_id = access_key_id or os.getenv('AWS_ACCESS_KEY_ID')
+        aws_secret_access_key = secret_access_key or os.getenv('AWS_SECRET_ACCESS_KEY')
+        
+        if not aws_access_key_id or not aws_secret_access_key:
+            logger.error("S3 credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.")
+            return False
+        
+        try:
+            # Create S3 client with custom endpoint if provided
+            s3_config = {
+                'aws_access_key_id': aws_access_key_id,
+                'aws_secret_access_key': aws_secret_access_key,
+                'region_name': region
+            }
+            
+            if endpoint_url:
+                s3_config['endpoint_url'] = endpoint_url
+            
+            s3_client = boto3.client('s3', **s3_config)
+            
+            # Construct S3 key (object name)
+            filename = file_path_obj.name
+            s3_key = f"{prefix}{filename}" if prefix else filename
+            # Remove trailing slash from prefix if present
+            if s3_key.startswith('/'):
+                s3_key = s3_key[1:]
+            
+            # Upload file
+            logger.info(f"Uploading {file_path} to s3://{bucket}/{s3_key}")
+            s3_client.upload_file(
+                file_path,
+                bucket,
+                s3_key,
+                ExtraArgs={'ContentType': 'text/csv'}
+            )
+            
+            logger.info(f"Successfully uploaded to s3://{bucket}/{s3_key}")
+            return True
+            
+        except ClientError as e:
+            logger.error(f"S3 client error during upload: {e}")
+            return False
+        except BotoCoreError as e:
+            logger.error(f"Boto3 core error during upload: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error during S3 upload: {e}")
+            return False
 
 
-def generate_date_range(start_days: int = 1, end_days: int = 90, step: int = 7) -> list[str]:
+def generate_date_range(start_date: str, end_date: str) -> list[str]:
     """
     Generate a list of future dates for querying.
     
@@ -558,12 +580,13 @@ def generate_date_range(start_days: int = 1, end_days: int = 90, step: int = 7) 
     Returns:
         List of dates in YYYY-MM-DD format
     """
-    today = datetime.now()
+    start_date = datetime.strptime(start_date,  "%d-%m-%Y") 
+    end_date = datetime.strptime(end_date,  "%d-%m-%Y") 
     dates = []
-    
-    for days in range(start_days, end_days + 1, step):
-        future_date = today + timedelta(days=days)
-        dates.append(future_date.strftime('%Y-%m-%d'))
+    current = start_date
+    while current <= end_date:
+        dates.append(current.strftime('%Y-%m-%d'))
+        current += timedelta(days=1)
     
     return dates
 
@@ -590,6 +613,7 @@ def main(config_path: Optional[str] = None):
     search_config = config.get('search', {})
     date_config = config.get('date_range', {})
     output_config = config.get('output', {})
+    s3_config = config.get('s3', {})
     
     # Routes from config (convert lists to tuples)
     routes_list = config.get('routes', [])
@@ -601,9 +625,8 @@ def main(config_path: Optional[str] = None):
     
     # Generate dates from config
     departure_dates = generate_date_range(
-        start_days=date_config.get('start_days', 7),
-        end_days=date_config.get('end_days', 60),
-        step=date_config.get('step', 7)
+        start_date=date_config.get('start_date', '01-01-2026'),
+        end_date=date_config.get('end_date', '07-01-2026')
     )
     
     # Output file with timestamp
@@ -645,6 +668,24 @@ def main(config_path: Optional[str] = None):
             fetcher.save_to_csv(all_offers, str(output_file))
             print(f"\n✓ Dataset saved to: {output_file}")
             print(f"  Total records: {len(all_offers)}")
+            
+            # Upload to S3 if enabled
+            if s3_config.get('enabled', False):
+                endpoint_url = s3_config.get('endpoint_url', '') or None
+                bucket = s3_config.get('bucket', 'flight-data')
+                region = s3_config.get('region', 'us-east-1')
+                prefix = s3_config.get('prefix', '')
+                
+                if upload_success := fetcher.upload_to_s3(
+                    file_path=str(output_file),
+                    bucket=bucket,
+                    endpoint_url=endpoint_url,
+                    region=region,
+                    prefix=prefix
+                ):
+                    print(f"✓ Dataset uploaded to S3: s3://{bucket}/{prefix}{output_file.name}")
+                else:
+                    print(f"✗ Failed to upload dataset to S3")
         else:
             print("\n✗ No flight offers retrieved")
             

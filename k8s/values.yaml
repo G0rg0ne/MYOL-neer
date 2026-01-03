@@ -1,0 +1,89 @@
+# Default values for flight-fetcher
+# This is a YAML-formatted file.
+
+# Image configuration
+image:
+  repository: g0rg0ne/flight-price-fetcher
+  tag: v3.0
+  pullPolicy: Always
+
+# CronJob configuration
+cronjob:
+  schedule: "*/10 * * * *"  # Every 10 minutes
+  concurrencyPolicy: Forbid  # Don't run if previous job still running
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 2  # Retry twice on failure
+  restartPolicy: OnFailure
+
+# Resource limits and requests
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "2Gi"  # Playwright needs memory
+    cpu: "1000m"
+
+# Node selector
+nodeSelector:
+  node-role.kubernetes.io/worker: ""
+
+# Persistent Volume Claim configuration
+pvc:
+  enabled: true
+  storageClassName: local-path
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+
+# Flight fetcher configuration
+config:
+  fetcher:
+    request_delay: 2.0
+    max_retries: 3
+    retry_delay: 10
+    mode: "local"
+  
+  search:
+    max_offers_per_search: 4
+    seat_class: "economy"
+    adults: 1
+    children: 0
+    currency: "EUR"
+  
+  date_range:
+    start_date: "15-01-2026"
+    end_date: "01-04-2026"
+  
+  routes:
+    - ["CDG", "AMS"]
+    - ["AMS", "CDG"]
+    - ["CDG", "MAD"]
+    - ["MAD", "CDG"]
+    - ["LHR", "CDG"]
+    - ["CDG", "LHR"]
+    - ["CDG", "ATH"]
+    - ["ATH", "CDG"]
+    - ["CDG", "FCO"]
+    - ["FCO", "CDG"]
+  
+  output:
+    directory: "data"
+    file_prefix: "flight_prices"
+
+# S3 Upload configuration
+s3:
+  enabled: true
+  endpoint_url: "http://192.168.1.129:9000"  # Custom S3-compatible endpoint (e.g., http://minio:9000)
+  bucket: "flight-data"
+  region: "us-east-1"
+  prefix: "prices/"
+  # Secret name containing AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (managed by SealedSecret)
+  existingSecret: "s3-credentials"
+
+# Namespace configuration
+namespace:
+  create: true
+  name: flight-fetcher
+

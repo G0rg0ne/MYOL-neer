@@ -60,3 +60,21 @@ output:
   # Prefix for output files (timestamp will be appended)
   file_prefix: "flight_prices"
 
+# S3 Upload Settings
+s3:
+  # Enable S3 upload after CSV save
+  enabled: false
+  
+  # Custom S3-compatible endpoint URL (e.g., http://minio:9000)
+  # Leave empty for AWS S3
+  endpoint_url: ""
+  
+  # S3 bucket name
+  bucket: "flight-data"
+  
+  # AWS region (required even for custom endpoints)
+  region: "us-east-1"
+  
+  # Optional prefix for object keys in bucket (e.g., "prices/")
+  prefix: "prices/"
+

@@ -51,7 +51,60 @@ docker compose up --build
 
 Data will be saved to the `./data` directory on your host.
 
-### Option B: Local Python
+### Option B: Kubernetes with ArgoCD (GitOps)
+
+Deploy to Kubernetes using ArgoCD for automated GitOps-style continuous delivery.
+
+1. **Apply the ArgoCD Application:**
+
+```bash
+kubectl apply -f k8s/argocd-application.yaml
+```
+
+ArgoCD will automatically sync and deploy all resources from the `k8s/` directory:
+- **Namespace** - Isolated `flight-fetcher` namespace
+- **CronJob** - Runs the fetcher every day at 9:00 AM
+- **ConfigMap** - Flight search configuration
+- **PersistentVolumeClaim** - 1GB storage for CSV data
+
+The deployment uses automated sync with self-healing, so any manual changes will be reverted to match the Git repository.
+
+![ArgoCD Deployment](assets/deployment_argoCD.png)
+
+2. **Using the Kubeconfig:**
+
+Set the `KUBECONFIG` environment variable to use the production cluster:
+
+```bash
+# Set KUBECONFIG environment variable
+export KUBECONFIG=./k8s/kubeconfig.yaml
+
+# Verify connection
+kubectl get nodes
+
+# Check pods in the flight-fetcher namespace
+kubectl get pods -n flight-fetcher
+
+# View CronJob status
+kubectl get cronjobs -n flight-fetcher
+
+# Check logs from the latest job
+kubectl logs -l app=flight-fetcher -n flight-fetcher --tail=100
+```
+
+Or use the `--kubeconfig` flag directly:
+
+```bash
+# Apply all manifests
+kubectl --kubeconfig=./k8s/kubeconfig.yaml apply -f k8s/
+
+# Watch pods
+kubectl --kubeconfig=./k8s/kubeconfig.yaml get pods -n flight-fetcher -w
+```
+
+> ⚠️ **Security Note**: The `kubeconfig.yaml` file contains sensitive credentials and is excluded from Git via `.gitignore`. Never commit this file to version control.
+
+### Option C: Local Python
 
 #### 1. Install Dependencies
 

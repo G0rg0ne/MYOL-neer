@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "flight-fetcher.fullname" . }}
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "flight-fetcher.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjob.schedule | quote }}
+  concurrencyPolicy: {{ .Values.cronjob.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.cronjob.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            {{- include "flight-fetcher.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: {{ .Values.cronjob.restartPolicy }}
+          {{- if .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml .Values.nodeSelector | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: {{ include "flight-fetcher.name" . }}
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              {{- if .Values.s3.enabled }}
+              envFrom:
+                - secretRef:
+                    name: {{ .Values.s3.existingSecret }}
+              {{- end }}
+              volumeMounts:
+                - name: config-volume
+                  mountPath: /app/config.yaml
+                  subPath: config.yaml
+                {{- if .Values.pvc.enabled }}
+                - name: data-volume
+                  mountPath: /app/data
+                {{- end }}
+          volumes:
+            - name: config-volume
+              configMap:
+                name: {{ include "flight-fetcher.fullname" . }}-config
+            {{- if .Values.pvc.enabled }}
+            - name: data-volume
+              persistentVolumeClaim:
+                claimName: {{ include "flight-fetcher.fullname" . }}-data
+            {{- end }}
+

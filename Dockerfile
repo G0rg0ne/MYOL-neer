@@ -31,7 +31,6 @@ RUN pip install --no-cache-dir uv
 
 # Copy dependency files first (for better layer caching)
 COPY pyproject.toml uv.lock ./
-COPY config.yaml ./
 
 # Install dependencies using uv (with local extras for playwright)
 RUN uv sync --frozen --extra local
