@@ -4,7 +4,7 @@
 # Image configuration
 image:
   repository: g0rg0ne/flight-price-fetcher
-  tag: v4.0
+  tag: v5.0
   pullPolicy: Always
 
 # CronJob configuration
@@ -13,7 +13,7 @@ cronjob:
   concurrencyPolicy: Forbid  # Don't run if previous job still running
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
-  backoffLimit: 2  # Retry twice on failure
+  backoffLimit: 4  # Retry up to 4 times on failure
   restartPolicy: OnFailure
 
 # Resource limits and requests

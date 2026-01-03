@@ -8,8 +8,8 @@ and builds a dataset with standardized schema for price analysis.
 
 import csv
 import os
+import sys
 import time
-import logging
 import re
 import asyncio
 import gc
@@ -20,10 +20,30 @@ from pathlib import Path
 import yaml
 import boto3
 from botocore.exceptions import ClientError, BotoCoreError
+from loguru import logger
 
 from fast_flights import FlightData, Passengers, create_filter, get_flights_from_filter
 from fast_flights.core import get_flights_from_filter_async
 from fast_flights.local_playwright import PlaywrightSession
+
+
+def configure_logging(level: str = "INFO") -> None:
+    """
+    Configure loguru logger with clean formatting.
+    
+    Args:
+        level: Log level (DEBUG, INFO, WARNING, ERROR)
+    """
+    # Remove default handler
+    logger.remove()
+    
+    # Add custom handler with clean format
+    logger.add(
+        sys.stderr,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        level=level,
+        colorize=True,
+    )
 
 
 def load_config(config_path: Optional[str] = None) -> dict:
@@ -48,13 +68,6 @@ def load_config(config_path: Optional[str] = None) -> dict:
         config = yaml.safe_load(f)
     
     return config
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 
 class GoogleFlightsFetcher:
@@ -964,14 +977,16 @@ def main(config_path: Optional[str] = None):
     Args:
         config_path: Optional path to config file. If None, uses config.yaml in script directory.
     """
+    # Configure logging
+    configure_logging(level="INFO")
     
     # Load configuration
     try:
         config = load_config(config_path)
         logger.info(f"Loaded configuration from {config_path or 'config.yaml'}")
     except FileNotFoundError as e:
-        print(f"\n✗ {e}")
-        print("  Please create a config.yaml file or specify a valid config path.")
+        logger.error(f"Configuration file not found: {e}")
+        logger.info("Please create a config.yaml file or specify a valid config path")
         return 1
     
     # Extract settings from config
@@ -986,7 +1001,7 @@ def main(config_path: Optional[str] = None):
     routes = [tuple(route) for route in routes_list]
     
     if not routes:
-        print("\n✗ No routes configured in config.yaml")
+        logger.error("No routes configured in config.yaml")
         return 1
     
     # Generate dates from config
@@ -1013,7 +1028,7 @@ def main(config_path: Optional[str] = None):
         
         # Log configuration summary
         logger.info(f"Routes: {len(routes)}")
-        logger.info(f"Date range: {date_config.get('start_days', 7)}-{date_config.get('end_days', 60)} days, step={date_config.get('step', 7)}")
+        logger.info(f"Date range: {date_config.get('start_date', '01-01-2026')}-{date_config.get('end_date', '07-01-2026')}")
         logger.info(f"Seat class: {search_config.get('seat_class', 'economy')}")
         logger.info(f"Max offers per search: {search_config.get('max_offers_per_search', 20)}")
         logger.info(f"Max concurrent requests: {fetcher.max_concurrent}")
@@ -1039,8 +1054,8 @@ def main(config_path: Optional[str] = None):
             with open(output_file_path, 'r', encoding='utf-8') as f:
                 record_count = sum(1 for line in f) - 1  # Subtract header line
             
-            print(f"\n✓ Dataset saved to: {output_file}")
-            print(f"  Total records: {record_count}")
+            logger.success(f"Dataset saved to: {output_file}")
+            logger.info(f"Total records: {record_count}")
             
             # Upload to S3 if enabled
             if s3_config.get('enabled', False):
@@ -1056,15 +1071,21 @@ def main(config_path: Optional[str] = None):
                     region=region,
                     prefix=prefix
                 ):
-                    print(f"✓ Dataset uploaded to S3: s3://{bucket}/{prefix}{output_file_path.name}")
+                    logger.success(f"Dataset uploaded to S3: s3://{bucket}/{prefix}{output_file_path.name}")
+                    # Clean up local file after successful S3 upload to prevent PVC storage exhaustion
+                    try:
+                        output_file_path.unlink()
+                        logger.success("Local file deleted after successful S3 upload")
+                    except OSError as e:
+                        logger.warning(f"Could not delete local file: {e}")
                 else:
-                    print(f"✗ Failed to upload dataset to S3")
+                    logger.error("Failed to upload dataset to S3")
+                    logger.info(f"Local file preserved: {output_file_path}")
         else:
-            print("\n✗ No flight offers retrieved")
+            logger.error("No flight offers retrieved")
             
     except Exception as e:
-        print(f"\n✗ Error: {e}")
-        logger.exception("Error during flight fetching")
+        logger.exception(f"Error during flight fetching: {e}")
         return 1
     
     return 0
