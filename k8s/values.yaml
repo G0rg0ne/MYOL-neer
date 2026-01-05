@@ -48,7 +48,7 @@ config:
     mode: "local"
   
   search:
-    max_offers_per_search: 4
+    max_offers_per_search: 5
     seat_class: "economy"
     adults: 1
     children: 0
@@ -77,7 +77,7 @@ config:
 # S3 Upload configuration
 s3:
   enabled: true
-  endpoint_url: "http://192.168.1.129:9000"  # Custom S3-compatible endpoint (e.g., http://minio:9000)
+  endpoint_url:    # Custom S3-compatible endpoint (e.g., http://minio:9000)
   bucket: "flight-data"
   region: "us-east-1"
   prefix: "prices/"
