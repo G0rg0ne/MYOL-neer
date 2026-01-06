@@ -21,9 +21,11 @@ resources:
   requests:
     memory: "1Gi"
     cpu: "500m"
+    ephemeral-storage: "500Mi"
   limits:
     memory: "3Gi"
     cpu: "1500m"
+    ephemeral-storage: "2Gi"
 
 # Node selector
 nodeSelector:
