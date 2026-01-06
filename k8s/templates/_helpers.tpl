@@ -50,14 +50,4 @@ app.kubernetes.io/name: {{ include "flight-fetcher.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
-{{/*
-Create the name of the service account to use
-*/}}
-{{- define "flight-fetcher.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create }}
-{{- default (include "flight-fetcher.fullname" .) .Values.serviceAccount.name }}
-{{- else }}
-{{- default "default" .Values.serviceAccount.name }}
-{{- end }}
-{{- end }}
 
