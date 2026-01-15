@@ -57,7 +57,7 @@ config:
     currency: "EUR"
   
   date_range:
-    start_date: "15-01-2026"
+    start_date: "01-02-2026"
     end_date: "01-06-2026"
   
   routes:
