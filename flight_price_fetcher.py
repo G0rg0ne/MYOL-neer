@@ -947,19 +947,17 @@ class GoogleFlightsFetcher:
             return False
 
 
-def generate_date_range(start_date: str, end_date: str) -> list[str]:
+def generate_date_range(end_date: str) -> list[str]:
     """
     Generate a list of future dates for querying.
     
     Args:
-        start_days: Days from today to start
-        end_days: Days from today to end
-        step: Day interval between dates
+        end_date: End date in DD-MM-YYYY format
         
     Returns:
         List of dates in YYYY-MM-DD format
     """
-    start_date = datetime.strptime(start_date,  "%d-%m-%Y") 
+    start_date = datetime.now() + timedelta(days=1)  # Always start from tomorrow
     end_date = datetime.strptime(end_date,  "%d-%m-%Y") 
     dates = []
     current = start_date
@@ -1004,9 +1002,8 @@ def main(config_path: Optional[str] = None):
         logger.error("No routes configured in config.yaml")
         return 1
     
-    # Generate dates from config
+    # Generate dates from config (always starts from tomorrow)
     departure_dates = generate_date_range(
-        start_date=date_config.get('start_date', '01-01-2026'),
         end_date=date_config.get('end_date', '07-01-2026')
     )
     
@@ -1028,7 +1025,8 @@ def main(config_path: Optional[str] = None):
         
         # Log configuration summary
         logger.info(f"Routes: {len(routes)}")
-        logger.info(f"Date range: {date_config.get('start_date', '01-01-2026')} to {date_config.get('end_date', '07-01-2026')}")
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        logger.info(f"Date range: {tomorrow} (tomorrow) to {date_config.get('end_date', '07-01-2026')}")
         logger.info(f"Seat class: {search_config.get('seat_class', 'economy')}")
         logger.info(f"Max offers per search: {search_config.get('max_offers_per_search', 20)}")
         logger.info(f"Max concurrent requests: {fetcher.max_concurrent}")

@@ -24,7 +24,6 @@ data:
       currency: {{ .Values.config.search.currency | quote }}
 
     date_range:
-      start_date: {{ .Values.config.date_range.start_date | quote }}
       end_date: {{ .Values.config.date_range.end_date | quote }}
 
     routes:
