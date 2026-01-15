@@ -4,7 +4,7 @@
 # Image configuration
 image:
   repository: g0rg0ne/flight-price-fetcher
-  tag: v5.0
+  tag: v6.0
   pullPolicy: Always
 
 # CronJob configuration
