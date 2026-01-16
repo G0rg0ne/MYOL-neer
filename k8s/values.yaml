@@ -21,7 +21,7 @@ resources:
   requests:
     memory: "1Gi"
     cpu: "500m"
-    ephemeral-storage: "500Mi"
+    ephemeral-storage: "200Mi" 
   limits:
     memory: "3Gi"
     cpu: "1500m"
@@ -33,7 +33,7 @@ nodeSelector:
 
 # Persistent Volume Claim configuration
 pvc:
-  enabled: true
+  enabled: false
   storageClassName: local-path
   accessModes:
     - ReadWriteOnce
