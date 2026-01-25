@@ -38,17 +38,8 @@ spec:
                 - name: config-volume
                   mountPath: /app/config.yaml
                   subPath: config.yaml
-                {{- if .Values.pvc.enabled }}
-                - name: data-volume
-                  mountPath: /app/data
-                {{- end }}
           volumes:
             - name: config-volume
               configMap:
                 name: {{ include "flight-fetcher.fullname" . }}-config
-            {{- if .Values.pvc.enabled }}
-            - name: data-volume
-              persistentVolumeClaim:
-                claimName: {{ include "flight-fetcher.fullname" . }}-data
-            {{- end }}
 
