@@ -31,14 +31,6 @@ resources:
 nodeSelector:
   node-role.kubernetes.io/worker: ""
 
-# Persistent Volume Claim configuration
-pvc:
-  enabled: false
-  storageClassName: local-path
-  accessModes:
-    - ReadWriteOnce
-  size: 1Gi
-
 # Flight fetcher configuration
 config:
   fetcher:
