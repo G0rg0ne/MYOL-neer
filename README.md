@@ -1,238 +1,306 @@
 # MYOL-neer
 
-Flight ticket price dataset builder using Google Flights via the fast-flights library.
+**Make Your Own Label — neer** (never ending endless research)
 
-## Features
+A scheduled Google Flights price dataset builder that scrapes real-time flight offers across configured routes and date ranges, then exports the results to structured CSV files — locally or directly to S3-compatible storage.
 
-- Fetches real-time flight prices from Google Flights
-- No API keys required - uses web scraping
-- Supports multiple routes and date ranges
-- Exports data to CSV with standardized schema
-- Configurable seat class filters (economy, premium-economy, business, first)
-- Rate limiting and error handling with retry logic
+Built on top of the excellent [**fast-flights**](https://github.com/AWeirdDev/flights) library, which reverse-engineered Google Flights' protobuf-based URL parameters to enable fast, API-key-free flight data retrieval.
 
-## Important: Regional Restrictions
+---
 
-**Google Flights displays a cookie consent dialog for EU users**, which can block automated scraping. If you encounter errors mentioning "Before you continue to Google" or cookie consent, you have these options:
+## How It Works
 
-1. **Run from a non-EU server** (e.g., AWS US-East, DigitalOcean NYC)
-2. **Use a VPN/proxy** from a non-EU country
-3. **Use a residential proxy service** like BrightData (supported in fast-flights v3)
+1. Reads routes, date ranges, and search parameters from `config.yaml`
+2. Iterates over all (route × date) combinations and fetches live offers from Google Flights
+3. Parses and normalises results into a flat, analysis-ready schema
+4. Saves data to a timestamped CSV file in the `data/` directory
+5. Optionally uploads the CSV to an S3 / MinIO bucket and removes the local copy
+
+The tool is designed for scheduled, unattended execution: run it daily as a Docker container or a Kubernetes CronJob to build a longitudinal price dataset.
+
+---
+
+## Technology Stack
+
+| Component | Technology |
+|-----------|-----------|
+| Language | Python 3.12 |
+| Flight data | [fast-flights](https://github.com/AWeirdDev/flights) (embedded) |
+| HTTP client | `primp` (Chrome-impersonating client) |
+| Browser automation | `playwright` (local mode) |
+| HTML parsing | `selectolax` |
+| Protobuf | `protobuf >= 5.27` |
+| Configuration | `pyyaml` |
+| Logging | `loguru` |
+| S3 storage | `boto3` |
+| Dependency management | `uv` + `hatchling` |
+| Containerisation | Docker / Docker Compose |
+| Kubernetes | Helm chart + CronJob + SealedSecrets |
+
+---
+
+## Project Structure
+
+```
+MYOL-neer/
+├── flight_price_fetcher.py      # Main entry point & GoogleFlightsFetcher class
+├── test_flight.py               # Quick connectivity/library test
+├── config.yaml                  # Local configuration (not committed)
+├── pyproject.toml               # Project metadata & dependencies
+├── uv.lock                      # Locked dependency versions
+├── Dockerfile                   # Container image definition
+├── docker-compose.yml           # Compose for local Docker runs
+│
+├── fast_flights/                # Embedded fast-flights library (AWeirdDev/flights)
+│   ├── __init__.py
+│   ├── core.py                  # Main fetch logic
+│   ├── filter.py                # TFS filter builder
+│   ├── schema.py                # Result / Flight data models
+│   ├── flights_impl.py          # FlightData, Passengers, TFSData
+│   ├── local_playwright.py      # Playwright-based fetching
+│   ├── fallback_playwright.py   # Fallback Playwright implementation
+│   ├── bright_data_fetch.py     # BrightData proxy integration
+│   ├── decoder.py               # JSON/protobuf response decoder
+│   ├── cookies_impl.py          # Cookie handling
+│   ├── search.py                # Airport search utilities
+│   ├── primp.py                 # HTTP client wrapper
+│   ├── cookies_pb2.py           # Generated protobuf definitions
+│   ├── flights_pb2.py           # Generated protobuf definitions
+│   └── _generated_enum.py       # IATA airport code enum
+│
+├── k8s/                         # Kubernetes / Helm deployment
+│   ├── Chart.yaml               # Helm chart metadata
+│   ├── values.yaml              # Default Helm values
+│   └── templates/
+│       ├── _helpers.tpl
+│       ├── namespace.yaml
+│       ├── cronjob.yaml         # Daily CronJob
+│       ├── configmap.yaml       # config.yaml generated from Helm values
+│       └── sealed-secret-s3.yaml # Encrypted S3 credentials (Bitnami SealedSecrets)
+│
+└── assets/
+    └── deployment_argoCD.png    # ArgoCD deployment screenshot
+```
+
+---
 
 ## Dataset Schema
 
-| Field | Description |
-|-------|-------------|
-| `origin` | IATA airport code of departure |
-| `destination` | IATA airport code of arrival |
-| `departure_date` | Flight departure date (YYYY-MM-DD) |
-| `query_date` | Date when price was queried (YYYY-MM-DD) |
-| `days_before_departure` | Days between query and departure |
-| `airline` | Airline name |
-| `price` | Total ticket price |
-| `currency` | Price currency code (e.g., USD, EUR) |
-| `stops` | Number of stops (0 = direct) |
-| `flight_duration` | Total flight duration in minutes |
-| `cabin` | Cabin class (ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST) |
-| `offer_rank` | Price ranking (1 = cheapest) |
-| `departure_time` | Departure time |
-| `arrival_time` | Arrival time |
-| `source` | Data source identifier ("google_flights") |
+Each row in the output CSV represents a single flight offer fetched at a specific point in time.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `origin` | string | IATA code of departure airport |
+| `destination` | string | IATA code of arrival airport |
+| `departure_date` | date | Flight departure date (YYYY-MM-DD) |
+| `query_date` | date | Date the price was queried (YYYY-MM-DD) |
+| `days_before_departure` | int | Days between query date and departure |
+| `airline` | string | Operating airline name |
+| `price` | float | Total ticket price |
+| `currency` | string | Currency code (e.g. EUR, USD) |
+| `stops` | int | Number of stops (0 = direct) |
+| `flight_duration` | int | Total flight duration in minutes |
+| `cabin` | string | Cabin class (ECONOMY / PREMIUM_ECONOMY / BUSINESS / FIRST) |
+| `offer_rank` | int | Price ranking within the search result (1 = cheapest) |
+| `departure_time` | string | Departure time |
+| `arrival_time` | string | Arrival time |
+| `source` | string | Data source identifier (`"google_flights"`) |
+
+---
+
+## Configuration
+
+All settings live in `config.yaml` in the project root (or are injected via Kubernetes ConfigMap). This file is **not committed to Git** — create it from the template below.
+
+```yaml
+# Fetcher behaviour
+fetcher:
+  request_delay: 2.0     # Seconds between requests
+  max_retries: 3         # Retry attempts on failure
+  retry_delay: 10        # Base delay before retry (exponential backoff)
+  mode: "local"          # "common" | "local" | "bright-data"
+  max_concurrent: 3      # Async concurrency limit
+
+# Search parameters
+search:
+  max_offers_per_search: 20
+  seat_class: "economy"  # economy | premium-economy | business | first
+  adults: 1
+  children: 0
+  currency: "EUR"
+
+# Date range (relative to today)
+date_range:
+  end_days: 30           # How many days ahead to search
+  step: 1                # Interval between dates
+
+# Routes (IATA airport codes)
+routes:
+  - ["CDG", "AMS"]       # Paris → Amsterdam
+  - ["CDG", "MAD"]       # Paris → Madrid
+  - ["LHR", "CDG"]       # London → Paris
+
+# Output
+output:
+  directory: "data"
+  file_prefix: "flight_prices"
+
+# S3 / MinIO (optional)
+s3:
+  enabled: false
+  endpoint_url: "http://your-minio:9000"
+  bucket: "flight-data"
+  prefix: "prices/"
+  # Credentials via env vars: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+```
+
+### Fetch Modes
+
+| Mode | Description | When to Use |
+|------|-------------|-------------|
+| `common` | Direct HTTP requests via `primp` | Fastest; works outside EU |
+| `local` | Playwright-controlled local Chromium | Handles JS / EU cookie consent walls |
+| `bright-data` | Routes requests through BrightData SERP proxy | Reliable worldwide; requires account |
+
+---
 
 ## Setup
 
-### Option A: Docker (Recommended)
+### Option A: Local Python
 
-1. Run with Docker Compose:
+**1. Install dependencies (using uv):**
+
+```bash
+pip install uv
+uv sync
+```
+
+Or with pip:
+
+```bash
+pip install -r requirements.txt   # if you export one, or install from pyproject.toml
+```
+
+**2. Install Playwright (required for `local` mode):**
+
+```bash
+uv run playwright install chromium
+# or
+playwright install chromium
+```
+
+**3. Create your config:**
+
+Copy the template above into `config.yaml` and edit routes/dates.
+
+**4. Test connectivity:**
+
+```bash
+uv run python test_flight.py
+```
+
+**5. Run the fetcher:**
+
+```bash
+uv run python flight_price_fetcher.py
+```
+
+Results are saved to `data/flight_prices_YYYYMMDD_HHMMSS.csv`.
+
+---
+
+### Option B: Docker (Recommended for Local Scheduling)
 
 ```bash
 docker compose up --build
 ```
 
-Data will be saved to the `./data` directory on your host.
+Output is written to `./data/` on the host via a bind mount.
 
-### Option B: Kubernetes with ArgoCD (GitOps)
+---
 
-Deploy to Kubernetes using ArgoCD for automated GitOps-style continuous delivery.
+### Option C: Kubernetes with Helm
 
-1. **Apply the ArgoCD Application:**
+**1. Customise values:**
+
+Edit `k8s/values.yaml` — set your routes, schedule, S3 endpoint, and image tag.
+
+**2. Install the Helm chart:**
+
+```bash
+helm install flight-fetcher ./k8s --namespace flight-fetcher --create-namespace
+```
+
+The chart deploys:
+- A **Namespace** (`flight-fetcher`)
+- A **ConfigMap** containing the generated `config.yaml`
+- A **CronJob** that runs daily at the configured time (default: noon UTC)
+- A **SealedSecret** for S3 credentials (requires Bitnami Sealed Secrets controller)
+
+**3. Monitor jobs:**
+
+```bash
+kubectl get cronjobs -n flight-fetcher
+kubectl get pods -n flight-fetcher
+kubectl logs -l app=flight-fetcher -n flight-fetcher --tail=100
+```
+
+---
+
+### Option D: GitOps with ArgoCD
+
+Apply the ArgoCD Application manifest to let ArgoCD manage the deployment from Git:
 
 ```bash
 kubectl apply -f k8s/argocd-application.yaml
 ```
 
-ArgoCD will automatically sync and deploy all resources from the `k8s/` directory:
-- **Namespace** - Isolated `flight-fetcher` namespace
-- **CronJob** - Runs the fetcher every day at 9:00 AM
-- **ConfigMap** - Flight search configuration
-- **PersistentVolumeClaim** - 1GB storage for CSV data
-
-The deployment uses automated sync with self-healing, so any manual changes will be reverted to match the Git repository.
+ArgoCD will automatically sync changes from the repository with self-healing enabled.
 
 ![ArgoCD Deployment](assets/deployment_argoCD.png)
 
-2. **Using the Kubeconfig:**
+---
 
-Set the `KUBECONFIG` environment variable to use the production cluster:
-
-```bash
-# Set KUBECONFIG environment variable
-export KUBECONFIG=./k8s/kubeconfig.yaml
-
-# Verify connection
-kubectl get nodes
-
-# Check pods in the flight-fetcher namespace
-kubectl get pods -n flight-fetcher
-
-# View CronJob status
-kubectl get cronjobs -n flight-fetcher
-
-# Check logs from the latest job
-kubectl logs -l app=flight-fetcher -n flight-fetcher --tail=100
-```
-
-Or use the `--kubeconfig` flag directly:
-
-```bash
-# Apply all manifests
-kubectl --kubeconfig=./k8s/kubeconfig.yaml apply -f k8s/
-
-# Watch pods
-kubectl --kubeconfig=./k8s/kubeconfig.yaml get pods -n flight-fetcher -w
-```
-
-> ⚠️ **Security Note**: The `kubeconfig.yaml` file contains sensitive credentials and is excluded from Git via `.gitignore`. Never commit this file to version control.
-
-### Option C: Local Python
-
-#### 1. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-#### 2. Install Playwright (Required for local mode)
-
-```bash
-pip install playwright
-playwright install chromium
-```
-
-## Configuration
-
-All settings are managed via **`config.yaml`** in the project root. Edit this file to customize your flight searches.
-
-### Configuration Structure
-
-```yaml
-# Fetcher Settings
-fetcher:
-  request_delay: 2.0    # Seconds between requests
-  max_retries: 3        # Retry attempts on error
-  retry_delay: 10       # Base delay before retry (exponential backoff)
-  mode: "local"         # "common" or "local"
-
-# Search Parameters
-search:
-  max_offers_per_search: 20
-  seat_class: "economy"   # economy, premium-economy, business, first
-  adults: 1
-  children: 0
-  currency: "EUR"
-
-# Date Range Settings
-date_range:
-  start_days: 1         # Days from today to start
-  end_days: 7           # Days from today to end
-  step: 1               # Interval between dates
-
-# Routes to Search (IATA airport codes)
-routes:
-  - ["CDG", "AMS"]      # Paris to Amsterdam
-  - ["CDG", "MAD"]      # Paris to Madrid
-  - ["LHR", "CDG"]      # London to Paris
-
-# Output Settings
-output:
-  directory: "data"
-  file_prefix: "flight_prices"
-```
-
-### Modes
-
-The `mode` parameter controls how requests are made:
-
-| Mode | Description |
-|------|-------------|
-| `common` | Direct HTTP requests (fastest, but may hit consent walls) |
-| `local` | Uses local Playwright browser (handles JavaScript, slower but more reliable) |
-
-## Usage
-
-### Test the API
-
-First, run the test script to verify the library works from your location:
-
-```bash
-python test_flight.py
-```
-
-### Run with Config
-
-The main script reads all settings from `config.yaml`:
-
-```bash
-python flight_price_fetcher.py
-```
-
-This will:
-- Load routes and settings from `config.yaml`
-- Fetch prices for configured date range
-- Save results to `data/flight_prices_YYYYMMDD_HHMMSS.csv`
+## Usage Examples
 
 ### Programmatic Usage
 
 ```python
 from flight_price_fetcher import GoogleFlightsFetcher, generate_date_range
 
-# Initialize fetcher
 fetcher = GoogleFlightsFetcher(
-    request_delay=2.0,  # seconds between requests
-    mode="local"        # uses local Playwright browser
+    request_delay=2.0,
+    mode="local",
+    max_concurrent=3,
 )
 
-# Define custom routes
 routes = [
-    ('LHR', 'CDG'),  # London to Paris
-    ('FRA', 'AMS'),  # Frankfurt to Amsterdam
+    ("LHR", "CDG"),   # London → Paris
+    ("FRA", "AMS"),   # Frankfurt → Amsterdam
 ]
 
-# Generate dates for next 30 days
-dates = generate_date_range(start_days=1, end_days=30, step=3)
+dates = generate_date_range(end_days=30, step=3)
 
-# Fetch offers
 offers = fetcher.fetch_multiple_routes(
     routes=routes,
     departure_dates=dates,
-    seat_class='business',  # Optional: filter by cabin
-    max_offers_per_search=10
+    seat_class="business",
+    max_offers_per_search=10,
 )
 
-# Save to CSV
-fetcher.save_to_csv(offers, 'my_dataset.csv')
+fetcher.save_to_csv(offers, "my_dataset.csv")
 ```
 
 ### Single Route Query
 
 ```python
 offers = fetcher.fetch_flight_offers(
-    origin='JFK',
-    destination='LAX',
-    departure_date='2025-01-15',
+    origin="JFK",
+    destination="LAX",
+    departure_date="2025-06-15",
     adults=1,
-    seat_class='economy',
-    max_offers=50
+    seat_class="economy",
+    max_offers=50,
 )
 ```
 
@@ -241,17 +309,13 @@ offers = fetcher.fetch_flight_offers(
 ```python
 from fast_flights import FlightData, Passengers, create_filter, get_flights_from_filter
 
-# Create flight data
 flight_data = FlightData(
-    date="2025-01-15",
+    date="2025-06-15",
     from_airport="JFK",
-    to_airport="LAX"
+    to_airport="LAX",
 )
-
-# Create passengers
 passengers = Passengers(adults=1, children=0, infants_in_seat=0, infants_on_lap=0)
 
-# Create filter
 flight_filter = create_filter(
     flight_data=[flight_data],
     trip="one-way",
@@ -259,41 +323,73 @@ flight_filter = create_filter(
     seat="economy",
 )
 
-# Get flights
 result = get_flights_from_filter(flight_filter, mode="local")
-
 print(result)
 ```
 
-## Rate Limiting
+---
 
-To avoid being blocked by Google:
-- Default delay of 2 seconds between requests
-- Automatic retry with exponential backoff on errors
-- Consider increasing `request_delay` in config for large batch jobs
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AWS_ACCESS_KEY_ID` | If S3 enabled | S3 / MinIO access key |
+| `AWS_SECRET_ACCESS_KEY` | If S3 enabled | S3 / MinIO secret key |
+| `BRIGHT_DATA_API_KEY` | If `mode: bright-data` | BrightData API key |
+| `BRIGHT_DATA_API_URL` | No | BrightData endpoint (default: `https://api.brightdata.com/request`) |
+| `BRIGHT_DATA_SERP_ZONE` | No | BrightData zone name (default: `serp_api1`) |
+| `KUBECONFIG` | No | Path to kubeconfig for kubectl access |
+
+---
+
+## Rate Limiting & Best Practices
+
+- Default 2-second delay between requests (`fetcher.request_delay`)
+- Automatic exponential backoff retry on failures
+- For large batch jobs (many routes × many dates), increase `request_delay` to 5+ seconds
+- Keep `max_concurrent` at 3 or below to avoid triggering Google rate limits
+
+---
+
+## Important: Regional Restrictions
+
+Google Flights shows a cookie consent dialog for EU-based IP addresses, which can block automated requests.
+
+**Solutions:**
+
+| Scenario | Recommendation |
+|----------|---------------|
+| Running from EU | Switch to `mode: local` (Playwright handles the consent wall) |
+| Cloud deployment | Use a US-East region (AWS, DigitalOcean, etc.) |
+| Reliable worldwide | Use `mode: bright-data` with a BrightData SERP zone |
+
+---
 
 ## Troubleshooting
 
-### Cookie Consent Wall (EU Users)
+### "Before you continue to Google" error
+You are hitting the EU cookie consent wall. Use `mode: local` or a non-EU server.
 
-If you see errors like "Before you continue to Google", you're hitting the EU cookie consent wall. Solutions:
+### Timeout errors
+- Increase `request_delay` to 5+ seconds
+- Switch to `mode: local`
+- Reduce `max_concurrent`
 
-1. **Use a US-based cloud server** (AWS, DigitalOcean, etc.)
-2. **Use a VPN** connected to a US server
-3. **Upgrade to fast-flights v3** and use a proxy service
+### `config.yaml` not found
+Create `config.yaml` in the project root. In Kubernetes, it is automatically injected via ConfigMap.
 
-### Timeout Errors
+### Playwright not installed
+```bash
+uv run playwright install chromium
+```
 
-If requests are timing out:
-- Increase `request_delay` in config to 5+ seconds
-- Try switching `mode` to `"local"`
-- Check your internet connection
+---
 
-### Config Not Found
+## Credits
 
-If you see "Config file not found":
-- Ensure `config.yaml` exists in the project root
-- Or pass a custom path: modify the `main()` call
+- **[fast-flights](https://github.com/AWeirdDev/flights)** by [AWeirdDev](https://github.com/AWeirdDev) — the core Google Flights scraping library used in this project. It works by reverse-engineering Google's protobuf-encoded `tfs` URL parameter to construct valid search requests without needing an API key. The `fast_flights/` directory in this repository contains an embedded copy of that library.
+
+---
 
 ## License
 
